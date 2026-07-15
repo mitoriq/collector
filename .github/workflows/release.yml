@@ -1,0 +1,291 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: collector-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.24.x"
+
+      - name: Verify Go modules
+        run: go mod verify
+
+      - name: Check module lock drift
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Check third-party notice drift
+        run: sh scripts/check-third-party-notices.sh
+
+      - name: Check formatting
+        run: |
+          git ls-files -z -- '*.go' | xargs -0 gofmt -w
+          git diff --exit-code
+
+      - name: Test
+        run: go test ./...
+
+      - name: Test installer
+        run: sh scripts/install.test.sh
+
+      - name: Audit Go dependencies
+        uses: golang/govulncheck-action@b625fbe08f3bccbe446d94fbf87fcc875a4f50ee # v1
+        with:
+          repo-checkout: false
+          go-package: ./...
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Check GoReleaser config
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+        with:
+          distribution: goreleaser
+          version: v2.17.0
+          args: check
+
+  snapshot:
+    if: github.event_name == 'workflow_dispatch'
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.24.x"
+
+      - name: Setup cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: v2.6.2
+
+      - name: Create ephemeral snapshot signing key
+        env:
+          COSIGN_PASSWORD: snapshot-only-key
+        run: |
+          set -euo pipefail
+          cosign generate-key-pair --output-key-prefix "$RUNNER_TEMP/collector-snapshot"
+          public_key_base64="$(base64 < "$RUNNER_TEMP/collector-snapshot.pub" | tr -d '\n')"
+          {
+            echo "COSIGN_KEY_PATH=$RUNNER_TEMP/collector-snapshot.key"
+            echo "COLLECTOR_RELEASE_API_URL=https://api.github.com/repos/mitoriq/collector/releases/latest"
+            echo "COLLECTOR_COSIGN_PUBLIC_KEY_B64=$public_key_base64"
+            echo "COLLECTOR_MACOS_TEAM_ID=SNAPSHOT00"
+          } >> "$GITHUB_ENV"
+
+      - name: Snapshot
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+        with:
+          distribution: goreleaser
+          version: v2.17.0
+          args: release --snapshot --clean
+        env:
+          COSIGN_PASSWORD: snapshot-only-key
+          MACOS_NOTARIZE_ENABLED: "false"
+
+      - name: Verify signed snapshot trust chain
+        run: |
+          set -euo pipefail
+          cosign verify-blob \
+            --key "$RUNNER_TEMP/collector-snapshot.pub" \
+            --signature dist/checksums.txt.sig \
+            dist/checksums.txt
+          third_party_entries="$(git ls-files THIRD_PARTY_LICENSES | LC_ALL=C sort)"
+          for archive in dist/*.tar.gz; do
+            entries="$(tar -tzf "$archive" | LC_ALL=C sort)"
+            if [[ "$archive" == *_linux_*.tar.gz ]]; then
+              expected_entries="$(printf '%s\n%s\n' "$third_party_entries" LICENSE NOTICE THIRD_PARTY_NOTICES.md mitoriq-collector mitoriq-collector.sig | LC_ALL=C sort)"
+            else
+              expected_entries="$(printf '%s\n%s\n' "$third_party_entries" LICENSE NOTICE THIRD_PARTY_NOTICES.md mitoriq-collector | LC_ALL=C sort)"
+            fi
+            if [[ "$entries" != "$expected_entries" ]]; then
+              echo "unexpected snapshot archive entries: $archive" >&2
+              exit 1
+            fi
+          done
+          for archive in dist/*_linux_*.tar.gz; do
+            target="$RUNNER_TEMP/$(basename "$archive" .tar.gz)"
+            mkdir -p "$target"
+            tar -xzf "$archive" -C "$target"
+            cosign verify-blob \
+              --key "$RUNNER_TEMP/collector-snapshot.pub" \
+              --signature "$target/mitoriq-collector.sig" \
+              "$target/mitoriq-collector"
+            if [[ "$archive" == *_linux_amd64.tar.gz ]]; then
+              "$target/mitoriq-collector" version | grep -Eq \
+                'release_key_sha256=[0-9a-f]{64} .*release_team_id=SNAPSHOT00'
+            fi
+          done
+
+      - name: Upload signed snapshot evidence
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: collector-snapshot-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    if: github.event_name == 'push' && needs.validate.result == 'success'
+    needs: validate
+    environment: collector-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.24.x"
+
+      - name: Setup cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: v2.6.2
+
+      - name: Verify release commit provenance
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
+      - name: Validate release inputs
+        env:
+          COLLECTOR_RELEASE_API_URL: ${{ vars.COLLECTOR_RELEASE_API_URL }}
+          COLLECTOR_COSIGN_PUBLIC_KEY_B64: ${{ vars.COLLECTOR_COSIGN_PUBLIC_KEY_B64 }}
+          COLLECTOR_MACOS_TEAM_ID: ${{ vars.COLLECTOR_MACOS_TEAM_ID }}
+          COLLECTOR_NEXT_COSIGN_PUBLIC_KEY_B64: ${{ vars.COLLECTOR_NEXT_COSIGN_PUBLIC_KEY_B64 }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+          MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          required=(
+            COLLECTOR_RELEASE_API_URL
+            COLLECTOR_COSIGN_PUBLIC_KEY_B64
+            COLLECTOR_MACOS_TEAM_ID
+            COSIGN_PASSWORD
+            COSIGN_PRIVATE_KEY
+            HOMEBREW_TAP_GITHUB_TOKEN
+            MACOS_NOTARY_ISSUER_ID
+            MACOS_NOTARY_KEY
+            MACOS_NOTARY_KEY_ID
+            MACOS_SIGN_P12
+            MACOS_SIGN_PASSWORD
+          )
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "missing required release secret or variable: $name" >&2
+              exit 1
+            fi
+          done
+          if [[ "$GITHUB_REF_TYPE" != "tag" || "$GITHUB_REF_NAME" != v* ]]; then
+            echo "publishing requires a v* tag ref" >&2
+            exit 1
+          fi
+          if [[ "$COLLECTOR_RELEASE_API_URL" != "https://api.github.com/repos/mitoriq/collector/releases/latest" ]]; then
+            echo "COLLECTOR_RELEASE_API_URL must target the official collector repository" >&2
+            exit 1
+          fi
+          if [[ ! "$COLLECTOR_MACOS_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]; then
+            echo "COLLECTOR_MACOS_TEAM_ID must be a 10-character Apple Team ID" >&2
+            exit 1
+          fi
+
+          umask 077
+          cosign_key="$RUNNER_TEMP/collector-release.key"
+          expected_public_key="$RUNNER_TEMP/collector-release-expected.pub"
+          actual_public_key="$RUNNER_TEMP/collector-release-actual.pub"
+          printf '%s' "$COSIGN_PRIVATE_KEY" > "$cosign_key"
+          printf '%s' "$COLLECTOR_COSIGN_PUBLIC_KEY_B64" | base64 --decode > "$expected_public_key"
+          cosign public-key --key "$cosign_key" > "$actual_public_key"
+          openssl pkey -pubin -in "$expected_public_key" -outform DER -out "$RUNNER_TEMP/expected.der"
+          openssl pkey -pubin -in "$actual_public_key" -outform DER -out "$RUNNER_TEMP/actual.der"
+          cmp "$RUNNER_TEMP/expected.der" "$RUNNER_TEMP/actual.der"
+          openssl pkey -pubin -in "$expected_public_key" -text -noout | grep -q "ASN1 OID: prime256v1"
+          if [[ -n "$COLLECTOR_NEXT_COSIGN_PUBLIC_KEY_B64" ]]; then
+            printf '%s' "$COLLECTOR_NEXT_COSIGN_PUBLIC_KEY_B64" | base64 --decode > "$RUNNER_TEMP/collector-release-next.pub"
+            openssl pkey -pubin -in "$RUNNER_TEMP/collector-release-next.pub" -outform DER -out "$RUNNER_TEMP/next.der"
+            openssl pkey -pubin -in "$RUNNER_TEMP/collector-release-next.pub" -text -noout | grep -q "ASN1 OID: prime256v1"
+            if cmp -s "$RUNNER_TEMP/expected.der" "$RUNNER_TEMP/next.der"; then
+              echo "next cosign public key must differ from current key" >&2
+              exit 1
+            fi
+          fi
+
+          printf '%s' "$MACOS_SIGN_P12" | base64 --decode > "$RUNNER_TEMP/collector-release.p12"
+          openssl pkcs12 -in "$RUNNER_TEMP/collector-release.p12" -passin env:MACOS_SIGN_PASSWORD -noout
+          openssl pkcs12 \
+            -in "$RUNNER_TEMP/collector-release.p12" \
+            -passin env:MACOS_SIGN_PASSWORD \
+            -clcerts -nokeys \
+            -out "$RUNNER_TEMP/collector-release-cert.pem"
+          certificate_subject="$(openssl x509 -in "$RUNNER_TEMP/collector-release-cert.pem" -noout -subject -nameopt RFC2253)"
+          certificate_team_id="$(printf '%s' "$certificate_subject" | sed -n 's/.*OU=\([^,]*\).*/\1/p')"
+          if [[ "$certificate_team_id" != "$COLLECTOR_MACOS_TEAM_ID" ]]; then
+            echo "Developer ID certificate Team ID does not match COLLECTOR_MACOS_TEAM_ID" >&2
+            exit 1
+          fi
+          printf '%s' "$MACOS_NOTARY_KEY" | base64 --decode > "$RUNNER_TEMP/collector-notary.p8"
+          openssl pkey -in "$RUNNER_TEMP/collector-notary.p8" -noout
+          echo "COSIGN_KEY_PATH=$cosign_key" >> "$GITHUB_ENV"
+
+      - name: Release
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+        with:
+          distribution: goreleaser
+          version: v2.17.0
+          args: release --clean
+        env:
+          COLLECTOR_RELEASE_API_URL: ${{ vars.COLLECTOR_RELEASE_API_URL }}
+          COLLECTOR_COSIGN_PUBLIC_KEY_B64: ${{ vars.COLLECTOR_COSIGN_PUBLIC_KEY_B64 }}
+          COLLECTOR_MACOS_TEAM_ID: ${{ vars.COLLECTOR_MACOS_TEAM_ID }}
+          COLLECTOR_NEXT_COSIGN_PUBLIC_KEY_B64: ${{ vars.COLLECTOR_NEXT_COSIGN_PUBLIC_KEY_B64 }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          MACOS_NOTARIZE_ENABLED: "true"
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+          MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
