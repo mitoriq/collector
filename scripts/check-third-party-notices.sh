@@ -19,7 +19,21 @@ trap cleanup EXIT
 
 (
   cd "$collector_root"
-  GOCACHE="$go_cache" go list -deps -f '{{with .Module}}{{.Path}} {{.Version}}{{end}}' ./cmd/mitoriq-collector
+  targets=(
+    darwin/amd64
+    darwin/arm64
+    linux/amd64
+    linux/arm64
+    windows/amd64
+    windows/arm64
+  )
+  for target in "${targets[@]}"; do
+    GOOS="${target%%/*}" \
+      GOARCH="${target##*/}" \
+      CGO_ENABLED=0 \
+      GOCACHE="$go_cache" \
+      go list -deps -f '{{with .Module}}{{.Path}} {{.Version}}{{end}}' ./cmd/mitoriq-collector
+  done
 ) | awk -v own="$module_path" 'NF == 2 && $1 != own' | LC_ALL=C sort -u > "$linked_modules"
 
 awk -F '|' '
