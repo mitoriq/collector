@@ -88,6 +88,54 @@ download() {
     "$url" -o "$output"
 }
 
+validate_archive_entries() {
+  archive_os="$1"
+  awk -v archive_os="$archive_os" '
+    {
+      if ($0 == "" || seen[$0]++) {
+        exit 1
+      }
+      if ($0 == "LICENSE") {
+        license_count++
+        next
+      }
+      if ($0 == "NOTICE") {
+        notice_count++
+        next
+      }
+      if ($0 == "THIRD_PARTY_NOTICES.md") {
+        notices_count++
+        next
+      }
+      if ($0 == "mitoriq-collector") {
+        binary_count++
+        next
+      }
+      if ($0 == "mitoriq-collector.sig") {
+        signature_count++
+        next
+      }
+      if (index($0, "THIRD_PARTY_LICENSES/") == 1) {
+        path = substr($0, length("THIRD_PARTY_LICENSES/") + 1)
+        if (path == "" || path ~ /(^|\/)\.\.?($|\/)/ || path ~ /\/\// || path ~ /\/$/) {
+          exit 1
+        }
+        third_party_license_count++
+        next
+      }
+      exit 1
+    }
+    END {
+      expected_signature_count = archive_os == "linux" ? 1 : 0
+      if (license_count != 1 || notice_count != 1 || notices_count != 1 ||
+          binary_count != 1 || signature_count != expected_signature_count ||
+          third_party_license_count < 1) {
+        exit 1
+      }
+    }
+  '
+}
+
 if [ "$requested_version" = "latest" ]; then
   download "https://api.github.com/repos/${repo}/releases/latest" 1048576 "${tmp_dir}/release.json"
   tag="$(jq -er '.tag_name' "${tmp_dir}/release.json")"
@@ -132,12 +180,7 @@ download "${base_url}/${archive}" 134217728 "${tmp_dir}/${archive}"
   fi
 
   entries="$(tar -tzf "$archive" | LC_ALL=C sort)"
-  if [ "$os" = "linux" ]; then
-    expected_entries="$(printf '%s\n' 'LICENSE' 'mitoriq-collector' 'mitoriq-collector.sig' | LC_ALL=C sort)"
-  else
-    expected_entries="$(printf '%s\n' 'LICENSE' 'mitoriq-collector' | LC_ALL=C sort)"
-  fi
-  if [ "$entries" != "$expected_entries" ]; then
+  if ! printf '%s\n' "$entries" | validate_archive_entries "$os"; then
     echo "release archive contains unexpected entries" >&2
     exit 1
   fi
