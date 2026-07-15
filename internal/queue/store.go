@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,11 +14,15 @@ import (
 
 	"github.com/mitoriq/collector/internal/contracts"
 	_ "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 type KeyGenerator func() (string, error)
 
-const busyTimeoutMilliseconds = 5000
+const (
+	busyRetryInterval = 10 * time.Millisecond
+	busyRetryTimeout  = 5 * time.Second
+)
 
 type Options struct {
 	KeyGenerator KeyGenerator
@@ -61,10 +66,6 @@ func Open(path string, options Options) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.ExecContext(context.Background(), fmt.Sprintf("PRAGMA busy_timeout = %d", busyTimeoutMilliseconds)); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
 
 	store := &Store{
 		db:           db,
@@ -109,7 +110,7 @@ func (store *Store) Enqueue(
 		return EnqueueResult{}, err
 	}
 	now := formatTime(store.now())
-	result, err := store.db.ExecContext(
+	result, err := store.execWrite(
 		ctx,
 		`INSERT OR IGNORE INTO queue_events
 			(idempotency_key, payload, attempts, available_at, created_at)
@@ -170,7 +171,7 @@ func (store *Store) Due(ctx context.Context, limit int, now time.Time) ([]Record
 
 func (store *Store) MarkDelivered(ctx context.Context, ids []int64) error {
 	for _, id := range ids {
-		if _, err := store.db.ExecContext(ctx, `DELETE FROM queue_events WHERE id = ?`, id); err != nil {
+		if _, err := store.execWrite(ctx, `DELETE FROM queue_events WHERE id = ?`, id); err != nil {
 			return err
 		}
 	}
@@ -179,7 +180,7 @@ func (store *Store) MarkDelivered(ctx context.Context, ids []int64) error {
 }
 
 func (store *Store) MarkRetry(ctx context.Context, id int64, availableAt time.Time) error {
-	_, err := store.db.ExecContext(
+	_, err := store.execWrite(
 		ctx,
 		`UPDATE queue_events
 			SET attempts = attempts + 1, available_at = ?
@@ -201,7 +202,7 @@ func (store *Store) Count(ctx context.Context) (int, error) {
 }
 
 func (store *Store) migrate(ctx context.Context) error {
-	_, err := store.db.ExecContext(ctx, `
+	_, err := store.execWrite(ctx, `
 		CREATE TABLE IF NOT EXISTS queue_events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			idempotency_key TEXT NOT NULL UNIQUE,
@@ -215,6 +216,53 @@ func (store *Store) migrate(ctx context.Context) error {
 	`)
 
 	return err
+}
+
+func (store *Store) execWrite(
+	ctx context.Context,
+	query string,
+	args ...any,
+) (sql.Result, error) {
+	retryCtx, cancel := context.WithTimeout(ctx, busyRetryTimeout)
+	defer cancel()
+
+	for {
+		result, err := store.db.ExecContext(retryCtx, query, args...)
+		if err == nil || !isSQLiteBusy(err) {
+			return result, err
+		}
+		if err := waitForBusyRetry(ctx, retryCtx, err); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func waitForBusyRetry(
+	ctx context.Context,
+	retryCtx context.Context,
+	busyErr error,
+) error {
+	timer := time.NewTimer(busyRetryInterval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-retryCtx.Done():
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return busyErr
+	case <-timer.C:
+		return nil
+	}
+}
+
+func isSQLiteBusy(err error) bool {
+	var sqliteErr interface {
+		error
+		Code() int
+	}
+	return errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == sqlite3.SQLITE_BUSY
 }
 
 func randomKey() (string, error) {
