@@ -94,12 +94,14 @@ Users can define local deny rules in `~/.config/mitoriq/collector.json`. Deny ru
 The collector does not overwrite existing tool configuration. Generate one complete, valid hook configuration at a time, then merge its top-level `hooks` object into the existing file instead of replacing unrelated settings:
 
 ```sh
-mitoriq-collector install --tools claude --print-settings-json > /tmp/mitoriq-claude-hooks.json
-mitoriq-collector install --tools codex --print-settings-json > /tmp/mitoriq-codex-hooks.json
-mitoriq-collector install --tools cursor --print-settings-json > /tmp/mitoriq-cursor-hooks.json
+HOOKS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mitoriq-hooks.XXXXXX")" &&
+mitoriq-collector install --tools claude --print-settings-json > "$HOOKS_DIR/claude-hooks.json" &&
+mitoriq-collector install --tools codex --print-settings-json > "$HOOKS_DIR/codex-hooks.json" &&
+mitoriq-collector install --tools cursor --print-settings-json > "$HOOKS_DIR/cursor-hooks.json" &&
+printf 'hook_settings_dir=%s\n' "$HOOKS_DIR"
 ```
 
-`--print-settings-json` only prints JSON. It does not install the collector service or write a tool configuration file. Use the generated block for the matching user-level configuration:
+`mktemp -d` creates an unpredictable owner-only directory so another local process cannot redirect these files through a pre-existing symlink. `--print-settings-json` only prints JSON. It does not install the collector service or write a tool configuration file. Use the generated block for the matching user-level configuration, then delete the generated directory:
 
 | Tool        | Configuration file        | Generated lifecycle events                                                                                                                              |
 | ----------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
