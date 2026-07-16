@@ -1118,7 +1118,7 @@ const (
 	hookCollectionTimeout = 350 * time.Millisecond
 	hookDeliveryTimeout   = 200 * time.Millisecond
 	queueDrainInterval    = time.Minute
-	queueWriteTimeout     = 250 * time.Millisecond
+	queueWriteTimeout     = 500 * time.Millisecond
 )
 
 var eventDeliveryTimeout = 2 * time.Second
