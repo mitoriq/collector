@@ -603,6 +603,8 @@ func TestClaudeHookReservesTimeToQueueWithDefaultDeliveryTimeout(t *testing.T) {
 }
 
 func TestRunClaudeHookWaitsForBriefAuditContentionBeforeQueueFallback(t *testing.T) {
+	const briefAuditContention = 25 * time.Millisecond
+
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	auditPath := filepath.Join(home, "collector-audit.jsonl")
@@ -621,10 +623,6 @@ func TestRunClaudeHookWaitsForBriefAuditContentionBeforeQueueFallback(t *testing
 	case <-time.After(time.Second):
 		t.Fatal("timed out acquiring holder lock")
 	}
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		close(release)
-	}()
 
 	requests := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
@@ -636,6 +634,10 @@ func TestRunClaudeHookWaitsForBriefAuditContentionBeforeQueueFallback(t *testing
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	startedAt := time.Now()
+	go func() {
+		time.Sleep(briefAuditContention)
+		close(release)
+	}()
 
 	err := runClaudeHook([]string{
 		"--api-url", server.URL,
