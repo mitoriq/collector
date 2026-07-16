@@ -3,6 +3,7 @@ set -eu
 
 collector_root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 publish_runbook="${collector_root}/../../docs/collector-oss-publish.md"
+release_workflow="${collector_root}/.github/workflows/release.yml"
 expected_homepage='    homepage: https://github.com/mitoriq/collector'
 homebrew_install='brew install --cask mitoriq/tap/mitoriq-collector'
 paid_domain='mitoriq.com'
@@ -30,6 +31,12 @@ fi
 
 if ! grep -Fq 'The macOS private beta does not require a custom domain.' "${collector_root}/README.md"; then
   echo "README must document the domain-free macOS private beta contract" >&2
+  exit 1
+fi
+
+legacy_pkcs12_reads="$(grep -Fc 'openssl pkcs12 -legacy' "$release_workflow" || true)"
+if [ "$legacy_pkcs12_reads" -ne 2 ]; then
+  echo "release workflow must enable OpenSSL legacy mode for both PKCS#12 reads" >&2
   exit 1
 fi
 
