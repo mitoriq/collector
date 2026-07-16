@@ -557,86 +557,6 @@ func TestClaudeAndCodexHooksQueueEventsWhenTheUplinkTimesOut(t *testing.T) {
 	}
 }
 
-func TestHooksBoundFallbackFromValidatedConfig(t *testing.T) {
-	tests := []struct {
-		name      string
-		run       func([]string, io.Reader, io.Writer, io.Writer) error
-		extraArgs []string
-		body      string
-	}{
-		{
-			name: "claude",
-			run:  runClaudeHook,
-			body: `{"session_id":"claude-session-1","cwd":"/repo","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"pwd"}}`,
-		},
-		{
-			name: "codex",
-			run:  runCodexHook,
-			body: `{"session_id":"codex-session-1","cwd":"/repo","hook_event_name":"PermissionRequest","tool_name":"shell","tool_input":{"command":"pwd"}}`,
-		},
-		{
-			name:      "cursor",
-			run:       runCursorHook,
-			extraArgs: []string{"--cursor-hooks-beta"},
-			body: `{
-				"conversation_id": "cursor-conversation-1",
-				"hook_event_name": "sessionStart"
-			}`,
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			setTestUserHome(t)
-			release := make(chan struct{})
-			server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
-				<-release
-			}))
-			defer server.Close()
-			defer close(release)
-			args := append([]string{}, hookFailureArgs()...)
-			args = append(args, test.extraArgs...)
-			for index, value := range args {
-				if value == "http://127.0.0.1:1" {
-					args[index] = server.URL
-				}
-			}
-			reader, writer := io.Pipe()
-			writeDone := make(chan error, 1)
-			go func() {
-				time.Sleep(300 * time.Millisecond)
-				_, writeErr := io.WriteString(writer, test.body)
-				writeDone <- errors.Join(writeErr, writer.Close())
-			}()
-			var stdout bytes.Buffer
-			var stderr bytes.Buffer
-			startedAt := time.Now()
-
-			if err := test.run(args, reader, &stdout, &stderr); err != nil {
-				t.Fatalf("run hook: %v", err)
-			}
-			if writeErr := <-writeDone; writeErr != nil {
-				t.Fatalf("write hook input: %v", writeErr)
-			}
-			if elapsed := time.Since(startedAt); elapsed >= 500*time.Millisecond {
-				t.Fatalf("hook response exceeded total fallback budget: %s", elapsed)
-			}
-			store, err := openEventQueue(daemonAdapterConfig{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer store.Close()
-			count, err := store.Count(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if count != 1 {
-				t.Fatalf("queued events = %d, want 1", count)
-			}
-		})
-	}
-}
-
 func TestClaudeHookReservesTimeToQueueWithDefaultDeliveryTimeout(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	release := make(chan struct{})
@@ -870,48 +790,6 @@ func TestSendHookEventsOrQueueRejectsNilQueueAfterDeliveryFailure(t *testing.T) 
 
 	if err == nil || !strings.Contains(err.Error(), "returned nil store") {
 		t.Fatalf("send hook events error = %v, want nil store error", err)
-	}
-}
-
-func TestHookDirectDeliveryTimeoutReservesQueueFallback(t *testing.T) {
-	tests := []struct {
-		name      string
-		remaining time.Duration
-		want      time.Duration
-	}{
-		{
-			name:      "full budget",
-			remaining: hookCollectionTimeout,
-			want:      hookDeliveryTimeout,
-		},
-		{
-			name:      "elapsed collection reduces delivery",
-			remaining: 250 * time.Millisecond,
-			want:      150 * time.Millisecond,
-		},
-		{
-			name:      "queue reserve remains",
-			remaining: hookQueueReserve,
-			want:      0,
-		},
-		{
-			name:      "less than queue reserve remains",
-			remaining: 50 * time.Millisecond,
-			want:      0,
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			got := hookDirectDeliveryTimeoutForRemaining(test.remaining, hookDeliveryTimeout)
-			if got != test.want {
-				t.Fatalf("delivery timeout = %s, want %s", got, test.want)
-			}
-		})
-	}
-
-	if got := hookDirectDeliveryTimeout(context.Background(), 175*time.Millisecond); got != 175*time.Millisecond {
-		t.Fatalf("delivery timeout without deadline = %s, want 175ms", got)
 	}
 }
 
