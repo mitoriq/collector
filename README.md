@@ -8,7 +8,13 @@ Mitoriq keeps the collector open source so the metadata-only claim can be inspec
 
 ## Quickstart After Release
 
-Open the Collector setup guide in Mitoriq `/now` or `/machines`, choose your OS, and copy the generated command. The command includes the supported package install and a short-lived, Organization-scoped enrollment code.
+The macOS private beta does not require a custom domain. Signed artifacts are published through GitHub Releases, and Homebrew verifies the release archive checksum before installing the Apple Developer ID signed and notarized binary.
+
+Open the Collector setup guide in Mitoriq `/now` or `/machines`, choose macOS, and copy the generated command. The command includes the supported package install and a short-lived, Organization-scoped enrollment code. The package-install portion is:
+
+```sh
+brew install --cask mitoriq/tap/mitoriq-collector
+```
 
 After the generated command completes, verify the local service:
 
@@ -18,15 +24,15 @@ mitoriq-collector doctor
 
 After enrollment, open Mitoriq web and check `/machines`, `/now`, and `/sessions`.
 
-The curl installer requires the cosign public key from the managed well-known endpoint plus the fingerprint shown through a separate trusted beta-onboarding channel. Do not obtain the key or fingerprint from the GitHub Release being installed.
+Linux and the standalone curl installer are not part of the supported private-beta onboarding path. `scripts/install.sh` remains available for maintainer-assisted verification and requires a local cosign public key plus its DER/SPKI fingerprint. Obtain the key and fingerprint through separately authenticated maintainer channels; do not obtain either trust input from the GitHub Release being installed.
 
-From a clone of this repository, create the managed key directory before downloading the public key and running the installer:
+From a clone of this repository, copy the separately provided public key into an owner-readable local path before running the installer:
 
 ```sh
 mkdir -p "$HOME/.config/mitoriq"
-curl --fail --proto '=https' --tlsv1.2 \
-  https://mitoriq.com/.well-known/collector-release-key.pem \
-  -o "$HOME/.config/mitoriq/collector-release.pub"
+install -m 0600 \
+  "/trusted/path/from-maintainer/collector-release.pub" \
+  "$HOME/.config/mitoriq/collector-release.pub"
 
 MITORIQ_COLLECTOR_PUBLIC_KEY_PATH="$HOME/.config/mitoriq/collector-release.pub" \
 MITORIQ_COLLECTOR_PUBLIC_KEY_SHA256="REPLACE_WITH_ONBOARDING_FINGERPRINT" \
@@ -34,7 +40,7 @@ MITORIQ_COLLECTOR_MACOS_TEAM_ID="REPLACE_WITH_APPLE_TEAM_ID" \
   sh ./scripts/install.sh
 ```
 
-`MITORIQ_COLLECTOR_MACOS_TEAM_ID` is required only on macOS. The installer fails before installation when trust inputs or verification tools are missing, the key fingerprint/signature/checksum is invalid, the archive has unexpected entries, or macOS Developer ID/notarization checks fail.
+`MITORIQ_COLLECTOR_MACOS_TEAM_ID` is required only on macOS. This manual installer path does not introduce a public Linux onboarding command. The installer fails before installation when trust inputs or verification tools are missing, the key fingerprint/signature/checksum is invalid, the archive has unexpected entries, or macOS Developer ID/notarization checks fail.
 
 ## What Is Sent
 

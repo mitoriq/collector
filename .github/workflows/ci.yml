@@ -52,6 +52,9 @@ jobs:
       - name: Test release signing helper
         run: sh scripts/sign-release-binary.test.sh
 
+      - name: Test release distribution contract
+        run: sh scripts/check-release-distribution-contract.sh
+
       - name: Build
         run: go build -o "$RUNNER_TEMP/mitoriq-collector" ./cmd/mitoriq-collector
 
