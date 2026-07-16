@@ -25,18 +25,51 @@ set -eu
 command_name="$(basename -- "$0")"
 
 case "$command_name" in
-  cosign|jq)
+  cosign)
+    case "${INSTALL_TEST_COSIGN_FAILURE:-}" in
+      checksums)
+        if printf '%s\n' "$*" | grep -q 'checksums.txt'; then
+          printf '%s\n' 'checksum signature verification failed' >&2
+          exit 42
+        fi
+        ;;
+      binary)
+        for argument in "$@"; do
+          case "$argument" in
+            mitoriq-collector.sig|*/mitoriq-collector.sig)
+              printf '%s\n' 'binary signature verification failed' >&2
+              exit 42
+              ;;
+          esac
+        done
+        ;;
+    esac
+    exit 0
+    ;;
+  jq)
     exit 0
     ;;
   codesign)
     : > "${INSTALL_TEST_MACOS_VERIFY_DIR}/codesign"
+    if [ "${INSTALL_TEST_CODESIGN_FAILURE:-}" = "verify" ] && [ "${1:-}" = "--verify" ]; then
+      printf '%s\n' 'Developer ID verification failed' >&2
+      exit 42
+    fi
     if [ "${1:-}" = "-dv" ]; then
-      printf '%s\n' 'TeamIdentifier=TEAMID1234' >&2
+      if [ "${INSTALL_TEST_CODESIGN_FAILURE:-}" = "team" ]; then
+        printf '%s\n' 'TeamIdentifier=WRONGTEAM0' >&2
+      else
+        printf '%s\n' 'TeamIdentifier=TEAMID1234' >&2
+      fi
     fi
     exit 0
     ;;
   spctl)
     : > "${INSTALL_TEST_MACOS_VERIFY_DIR}/spctl"
+    if [ "${INSTALL_TEST_SPCTL_FAILURE:-}" = "assessment" ]; then
+      printf '%s\n' 'Gatekeeper assessment failed' >&2
+      exit 42
+    fi
     exit 0
     ;;
   curl)
@@ -75,6 +108,8 @@ case "$command_name" in
       printf '%s\n' 'ASN1 OID: prime256v1'
     elif [ "${1:-}" = "pkey" ]; then
       printf '%s\n' 'fixture DER'
+    elif [ "$#" -ge 3 ]; then
+      printf '%s\n' "SHA2-256(fixture)= ${INSTALL_TEST_ARCHIVE_SHA256:-fixture-sha256}"
     else
       printf '%s\n' 'SHA2-256(fixture)= fixture-sha256'
     fi
@@ -360,3 +395,95 @@ if [ -e "${rejected_darwin_install_dir}/mitoriq-collector" ]; then
   printf '%s\n' 'macOS installer wrote a binary from an invalid archive' >&2
   exit 1
 fi
+
+assert_rejected_without_overwrite() {
+  scenario="$1"
+  expected_error="$2"
+  uname_s="$3"
+  uname_m="$4"
+  cosign_failure="$5"
+  archive_sha256="$6"
+  codesign_failure="$7"
+  spctl_failure="$8"
+  rejected_download_dir="${test_root}/download-${scenario}"
+  rejected_moved_download_dir="${test_root}/download-${scenario}-moved"
+  rejected_install_dir="${test_root}/install-${scenario}"
+  rejected_verify_dir="${test_root}/verify-${scenario}"
+  archive_name="mitoriq-collector_1.2.3_linux_amd64.tar.gz"
+  macos_team_id=""
+
+  if [ "$uname_s" = "Darwin" ]; then
+    archive_name="mitoriq-collector_1.2.3_darwin_arm64.tar.gz"
+    macos_team_id="TEAMID1234"
+  fi
+
+  mkdir -p "$rejected_install_dir" "$rejected_verify_dir"
+  printf '%s\n' 'existing collector' > "${rejected_install_dir}/mitoriq-collector"
+
+  set +e
+  rejected_output="$(
+    LC_ALL=C \
+      PATH="${fake_bin}:$PATH" \
+      MITORIQ_COLLECTOR_INSTALL_DIR="$rejected_install_dir" \
+      MITORIQ_COLLECTOR_PUBLIC_KEY_PATH="$public_key_path" \
+      MITORIQ_COLLECTOR_PUBLIC_KEY_SHA256='fixture-sha256' \
+      MITORIQ_COLLECTOR_MACOS_TEAM_ID="$macos_team_id" \
+      MITORIQ_COLLECTOR_VERSION='v1.2.3' \
+      INSTALL_TEST_ARCHIVE_NAME="$archive_name" \
+      INSTALL_TEST_ARCHIVE_SHA256="$archive_sha256" \
+      INSTALL_TEST_CODESIGN_FAILURE="$codesign_failure" \
+      INSTALL_TEST_COSIGN_FAILURE="$cosign_failure" \
+      INSTALL_TEST_DOWNLOAD_DIR="$rejected_download_dir" \
+      INSTALL_TEST_MACOS_VERIFY_DIR="$rejected_verify_dir" \
+      INSTALL_TEST_MOVED_DOWNLOAD_DIR="$rejected_moved_download_dir" \
+      INSTALL_TEST_SPCTL_FAILURE="$spctl_failure" \
+      INSTALL_TEST_UNAME_M="$uname_m" \
+      INSTALL_TEST_UNAME_S="$uname_s" \
+      sh "${script_dir}/install.sh" 2>&1
+  )"
+  rejected_status=$?
+  set -e
+
+  if [ "$rejected_status" -eq 0 ]; then
+    printf 'installer accepted rejected scenario: %s\n' "$scenario" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "$rejected_output" | grep -q "$expected_error"; then
+    printf 'installer returned an unexpected error for %s:\n%s\n' \
+      "$scenario" "$rejected_output" >&2
+    exit 1
+  fi
+  if [ "$(cat "${rejected_install_dir}/mitoriq-collector")" != "existing collector" ]; then
+    printf 'installer overwrote the existing binary for: %s\n' "$scenario" >&2
+    exit 1
+  fi
+}
+
+assert_rejected_without_overwrite \
+  checksum-signature \
+  'checksum signature verification failed' \
+  Linux x86_64 checksums fixture-sha256 '' ''
+assert_rejected_without_overwrite \
+  archive-checksum \
+  'release archive checksum does not match' \
+  Linux x86_64 '' tampered-sha256 '' ''
+assert_rejected_without_overwrite \
+  linux-signature \
+  'binary signature verification failed' \
+  Linux x86_64 binary fixture-sha256 '' ''
+assert_rejected_without_overwrite \
+  macos-codesign \
+  'Developer ID verification failed' \
+  Darwin arm64 '' fixture-sha256 verify ''
+assert_rejected_without_overwrite \
+  macos-team \
+  'collector Developer ID Team ID does not match' \
+  Darwin arm64 '' fixture-sha256 team ''
+assert_rejected_without_overwrite \
+  macos-notarization \
+  'Gatekeeper assessment failed' \
+  Darwin arm64 '' fixture-sha256 '' assessment
+assert_rejected_without_overwrite \
+  windows \
+  'unsupported operating system: windows_nt' \
+  Windows_NT x86_64 '' fixture-sha256 '' ''

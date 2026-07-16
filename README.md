@@ -4,43 +4,46 @@ Mitoriq Collector is a local, outbound-only collector for Claude Code, Codex, an
 
 Mitoriq keeps the collector open source so the metadata-only claim can be inspected in code.
 
-> **Release status:** the source is available for review, but signed v0.1.0 artifacts and the Homebrew tap are not published yet. Installation commands become available after the signed release passes the documented release gates.
+> **Release status:** the latest stable signed artifacts for macOS and Linux are available from the official distribution page and GitHub Releases. The Homebrew Cask is published at `mitoriq/tap/mitoriq-collector`.
 
-## Quickstart After Release
+## Official Distribution and Trust Root
 
-The macOS private beta does not require a custom domain. Signed artifacts are published through GitHub Releases, and Homebrew verifies the release archive checksum before installing the Apple Developer ID signed and notarized binary.
+Use the Mitoriq distribution page as the human-readable handoff and the well-known
+endpoints as the machine-readable contract:
 
-Open the Collector setup guide in Mitoriq `/now` or `/machines`, choose macOS, and copy the generated command. The command includes the supported package install and a short-lived, Organization-scoped enrollment code. The package-install portion is:
+- Distribution: <https://mitoriq.vercel.app/collector>
+- Latest release manifest: <https://mitoriq.vercel.app/.well-known/collector-release.json>
+- Cosign public key: <https://mitoriq.vercel.app/.well-known/collector-release-key.pem>
+- Fingerprint-addressed Cosign public key: <https://mitoriq.vercel.app/.well-known/collector-release-keys/4bfa1f0245bc7a0f735e10503773f8c8a0fe2f4d61b00a919f66e952dab6b36b.pem>
+- Cosign public key DER/SPKI SHA-256: `4bfa1f0245bc7a0f735e10503773f8c8a0fe2f4d61b00a919f66e952dab6b36b`
+- macOS Developer ID Team ID: `7FY7MQ69N4`
+
+The manifest is fail-closed: it publishes only a stable release whose tag, release
+URL, asset names, asset URLs, checksums, and signatures match the official
+`mitoriq/collector` release contract. Do not obtain the public key and fingerprint
+from the GitHub Release being verified.
+
+## Quickstart
+
+On macOS, Homebrew verifies the release archive checksum before installing the
+Apple Developer ID signed and notarized binary:
 
 ```sh
 brew install --cask mitoriq/tap/mitoriq-collector
-```
-
-After the generated command completes, verify the local service:
-
-```sh
 mitoriq-collector doctor
 ```
 
+For direct macOS or Linux installation, use the commands rendered by the official
+distribution page. That handoff verifies the fingerprint-addressed ECDSA P-256
+public key, signed checksum manifest, archive checksum, and platform signature
+before placing the binary. On macOS it also performs strict Developer ID
+verification, checks Team ID `7FY7MQ69N4`, and runs the Gatekeeper assessment.
+
+The official handoff does not download and execute `scripts/install.sh`. The helper
+remains available as auditable source and as a maintainer test fixture, but it is
+not itself a signed release asset. Never pipe a remote installer into a shell.
+
 After enrollment, open Mitoriq web and check `/machines`, `/now`, and `/sessions`.
-
-Linux and the standalone curl installer are not part of the supported private-beta onboarding path. `scripts/install.sh` remains available for maintainer-assisted verification and requires a local cosign public key plus its DER/SPKI fingerprint. Obtain the key and fingerprint through separately authenticated maintainer channels; do not obtain either trust input from the GitHub Release being installed.
-
-From a clone of this repository, copy the separately provided public key into an owner-readable local path before running the installer:
-
-```sh
-mkdir -p "$HOME/.config/mitoriq"
-install -m 0600 \
-  "/trusted/path/from-maintainer/collector-release.pub" \
-  "$HOME/.config/mitoriq/collector-release.pub"
-
-MITORIQ_COLLECTOR_PUBLIC_KEY_PATH="$HOME/.config/mitoriq/collector-release.pub" \
-MITORIQ_COLLECTOR_PUBLIC_KEY_SHA256="REPLACE_WITH_ONBOARDING_FINGERPRINT" \
-MITORIQ_COLLECTOR_MACOS_TEAM_ID="REPLACE_WITH_APPLE_TEAM_ID" \
-  sh ./scripts/install.sh
-```
-
-`MITORIQ_COLLECTOR_MACOS_TEAM_ID` is required only on macOS. This manual installer path does not introduce a public Linux onboarding command. The installer fails before installation when trust inputs or verification tools are missing, the key fingerprint/signature/checksum is invalid, the archive has unexpected entries, or macOS Developer ID/notarization checks fail.
 
 ## What Is Sent
 
@@ -143,6 +146,9 @@ On Windows, enrollment tokens are stored in Windows Credential Manager when avai
 
 `mitoriq-collector doctor` prints Codex and Claude Code discovery candidates, including `%USERPROFILE%\.codex`, explicit `CODEX_HOME`, the WSL shared Codex home under `/mnt/<drive>/Users/<windows-user>/.codex`, and `%USERPROFILE%\.claude\projects`.
 
+Windows service installation and a signed Windows download are experimental and
+are not part of the supported distribution contract.
+
 ## Signed Updates
 
 Linux release binaries and `checksums.txt` have detached cosign signatures. macOS binaries use Developer ID signing/notarization and a cosign-signed checksum manifest for archive integrity. Release builds embed the HTTPS release API URL and the ECDSA public key used by the updater. An update is applied only after the checksum signature and archive SHA-256 verify (plus the inner binary signature on Linux); a failed replacement or `version` self-check restores the previous binary.
@@ -169,7 +175,9 @@ The local audit log records metadata-only summaries such as privacy level, event
 
 ## Limitations
 
-Cursor permission/user-input waiting state, Windows service installation, and L3 redacted summaries remain outside the reliable support boundary. Signed auto-update is a v1 capability and is not enabled by default.
+Cursor permission/user-input waiting state, Windows service installation, signed
+Windows distribution, and L3 redacted summaries remain outside the reliable support
+boundary. Signed stable-channel updates are opt-in and are not enabled by default.
 
 ## Release
 
