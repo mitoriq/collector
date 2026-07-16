@@ -1190,10 +1190,7 @@ func sendHookEventsOrQueueWithOpener(
 	if len(events) == 0 {
 		return nil
 	}
-	queueCtx, stopQueue := context.WithTimeout(
-		context.WithoutCancel(hookCtx),
-		deliveryTimeout+queueWriteTimeout,
-	)
+	queueCtx, stopQueue := context.WithCancel(context.WithoutCancel(hookCtx))
 	defer stopQueue()
 	queueResult := make(chan hookQueueOpenResult, 1)
 	go func() {
@@ -1214,7 +1211,16 @@ func sendHookEventsOrQueueWithOpener(
 		sendErr = fmt.Errorf("collector events not fully accepted")
 	}
 
-	result := <-queueResult
+	fallbackCtx, stopFallback := context.WithTimeout(
+		context.WithoutCancel(hookCtx),
+		queueWriteTimeout,
+	)
+	defer stopFallback()
+	result, waitErr := waitForHookQueueOpen(fallbackCtx, stopQueue, queueResult)
+	if waitErr != nil {
+		closeHookQueue(result.store)
+		return errors.Join(sendErr, fmt.Errorf("open collector event queue: %w", waitErr))
+	}
 	if result.err != nil {
 		closeHookQueue(result.store)
 		return errors.Join(sendErr, fmt.Errorf("open collector event queue: %w", result.err))
@@ -1222,13 +1228,33 @@ func sendHookEventsOrQueueWithOpener(
 	if result.store == nil {
 		return errors.Join(sendErr, fmt.Errorf("open collector event queue: returned nil store"))
 	}
-	if queueErr := enqueueEvents(queueCtx, result.store, events); queueErr != nil {
+	if queueErr := enqueueEvents(fallbackCtx, result.store, events); queueErr != nil {
 		closeHookQueue(result.store)
 		return errors.Join(sendErr, queueErr)
 	}
 	closeHookQueue(result.store)
 
 	return nil
+}
+
+func waitForHookQueueOpen(
+	ctx context.Context,
+	stopQueue context.CancelFunc,
+	queueResult <-chan hookQueueOpenResult,
+) (hookQueueOpenResult, error) {
+	select {
+	case result := <-queueResult:
+		return result, nil
+	case <-ctx.Done():
+		select {
+		case result := <-queueResult:
+			return result, nil
+		default:
+		}
+		stopQueue()
+		result := <-queueResult
+		return result, ctx.Err()
+	}
 }
 
 func closeHookQueue(eventQueue *queue.Store) {

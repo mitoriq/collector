@@ -782,6 +782,53 @@ func TestSendHookEventsOrQueueReservesQueueBudgetAfterHookDeadline(t *testing.T)
 	}
 }
 
+func TestSendHookEventsOrQueueStopsQueueOpenAfterFallbackBudget(t *testing.T) {
+	const (
+		slowDeliveryTimeout = time.Second
+		maxFallbackDuration = 750 * time.Millisecond
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		_ *http.Request,
+	) {
+		writer.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	client := uplink.NewClient(uplink.Config{
+		APIURL:            server.URL,
+		AllowInsecureHTTP: true,
+		HTTPClient:        server.Client(),
+	})
+	queueOpenStopped := make(chan struct{})
+	startedAt := time.Now()
+
+	err := sendHookEventsOrQueueWithOpener(
+		context.Background(),
+		daemonAdapterConfig{},
+		slowDeliveryTimeout,
+		client,
+		[]contracts.AgentEvent{{IdempotencyKey: "bounded-fallback-open"}},
+		func(ctx context.Context, _ daemonAdapterConfig) (*queue.Store, error) {
+			<-ctx.Done()
+			close(queueOpenStopped)
+			return nil, ctx.Err()
+		},
+	)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("queue open error = %v, want context deadline exceeded", err)
+	}
+	select {
+	case <-queueOpenStopped:
+	default:
+		t.Fatal("fallback queue opener was not joined after timeout")
+	}
+	if elapsed := time.Since(startedAt); elapsed >= maxFallbackDuration {
+		t.Fatalf("fallback queue open exceeded hook budget: %s", elapsed)
+	}
+}
+
 func TestSendHookEventsOrQueueCancelsAndJoinsSpeculativeQueue(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("content-type", "application/json")
