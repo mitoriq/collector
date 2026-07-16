@@ -602,6 +602,70 @@ func TestClaudeHookReservesTimeToQueueWithDefaultDeliveryTimeout(t *testing.T) {
 	}
 }
 
+func TestRunClaudeHookWaitsForBriefAuditContentionBeforeQueueFallback(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	auditPath := filepath.Join(home, "collector-audit.jsonl")
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- filelock.With(auditPath+".lock", func() error {
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-locked:
+	case <-time.After(time.Second):
+		t.Fatal("timed out acquiring holder lock")
+	}
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		close(release)
+	}()
+
+	requests := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests <- struct{}{}
+		writer.Header().Set("content-type", "application/json")
+		_, _ = writer.Write([]byte(`{"accepted":1,"duplicated":0,"rejected":0}`))
+	}))
+	defer server.Close()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	startedAt := time.Now()
+
+	err := runClaudeHook([]string{
+		"--api-url", server.URL,
+		"--allow-insecure-http",
+		"--audit-log", auditPath,
+		"--token", "mtq_e_token_secret",
+		"--organization-id", "org-1",
+		"--machine-id", "machine-1",
+		"--machine-enrollment-id", "enrollment-1",
+		"--member-id", "member-1",
+	}, strings.NewReader(
+		`{"session_id":"claude-session-1","cwd":"/repo","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"pwd"}}`,
+	), &stdout, &stderr)
+
+	if err != nil {
+		t.Fatalf("run hook: %v", err)
+	}
+	if holderErr := <-holderDone; holderErr != nil {
+		t.Fatal(holderErr)
+	}
+	select {
+	case <-requests:
+	default:
+		t.Fatal("brief audit contention caused a queue fallback instead of direct delivery")
+	}
+	if elapsed := time.Since(startedAt); elapsed >= 500*time.Millisecond {
+		t.Fatalf("hook response exceeded delivery budget: %s", elapsed)
+	}
+}
+
 func TestHookFallbackStopsWaitingWithinQueueBudget(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "queue.db")
 	firstStore, err := queue.Open(path, queue.Options{})
@@ -728,6 +792,66 @@ func TestClaudeHookReturnsWithinBudgetWhenQueueWriterStaysLocked(t *testing.T) {
 	}
 }
 
+func TestClaudeHookReturnsWithinBudgetWhenUplinkAndQueueWriterStayBlocked(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	store, err := openEventQueue(daemonAdapterConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(home, ".local", "state", "mitoriq", "collector-queue.db")
+	lockDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockDB.Close()
+	transaction, err := lockDB.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transaction.Rollback()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := transaction.ExecContext(context.Background(), `INSERT INTO queue_events
+		(idempotency_key, payload, attempts, available_at, created_at)
+		VALUES (?, ?, 0, ?, ?)`, "held-key", "{}", now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+	args := hookFailureArgs()
+	for index, value := range args {
+		if value == "http://127.0.0.1:1" {
+			args[index] = server.URL
+		}
+	}
+	startedAt := time.Now()
+
+	err = runClaudeHook(
+		args,
+		strings.NewReader(
+			`{"session_id":"claude-session-1","cwd":"/repo","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"pwd"}}`,
+		),
+		io.Discard,
+		io.Discard,
+	)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("hook error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed >= 500*time.Millisecond {
+		t.Fatalf("hook response exceeded queueing budget: %s", elapsed)
+	}
+}
+
 func hookFailureArgs() []string {
 	return []string{
 		"--api-url", "http://127.0.0.1:1",
@@ -825,6 +949,58 @@ func TestRunCursorHookFailsOpenWhenTelemetryUploadStalls(t *testing.T) {
 		"conversation_id": "cursor-conversation-1",
 		"hook_event_name": "sessionStart"
 	}`), &stdout, &stderr, 50*time.Millisecond)
+
+	if err != nil {
+		t.Fatalf("hook blocked Cursor: %v", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > 500*time.Millisecond {
+		t.Fatalf("hook response exceeded fail-open budget: %s", elapsed)
+	}
+	if strings.TrimSpace(stdout.String()) != `{"continue":true}` {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if strings.Contains(stderr.String(), "cursor_hook_warning=") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	store, err := openEventQueue(daemonAdapterConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	count, err := store.Count(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("queued events = %d, want 1", count)
+	}
+}
+
+func TestRunCursorHookUsesBoundedDefaultDeliveryTimeout(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	startedAt := time.Now()
+
+	err := runCursorHook([]string{
+		"--cursor-hooks-beta",
+		"--api-url", server.URL,
+		"--allow-insecure-http",
+		"--token", "mtq_e_token_secret",
+		"--organization-id", "org-1",
+		"--machine-id", "machine-1",
+		"--machine-enrollment-id", "enrollment-1",
+		"--member-id", "member-1",
+	}, strings.NewReader(`{
+		"conversation_id": "cursor-conversation-1",
+		"hook_event_name": "sessionStart"
+	}`), &stdout, &stderr)
 
 	if err != nil {
 		t.Fatalf("hook blocked Cursor: %v", err)

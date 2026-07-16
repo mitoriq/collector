@@ -23,7 +23,7 @@ type KeyGenerator func() (string, error)
 const (
 	busyRetryInterval = 10 * time.Millisecond
 	busyRetryTimeout  = 5 * time.Second
-	sqliteBusyTimeout = 50 * time.Millisecond
+	sqliteBusyTimeout = 25 * time.Millisecond
 )
 
 type Options struct {

@@ -355,15 +355,13 @@ func runEnroll(args []string, stdout io.Writer, stderr io.Writer) error {
 }
 
 func runClaudeHook(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
-	hookCtx, stopHook := context.WithTimeout(context.Background(), hookProcessingTimeout)
-	defer stopHook()
 	flags := flag.NewFlagSet("claude-hook", flag.ContinueOnError)
 	adapterValues := addAdapterFlags(flags)
 	flags.SetOutput(stderr)
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	config, err := adapterValues.config(hookCtx)
+	config, err := adapterValues.config(context.Background())
 	if err != nil {
 		return err
 	}
@@ -379,19 +377,9 @@ func runClaudeHook(args []string, stdin io.Reader, stdout io.Writer, stderr io.W
 		return err
 	}
 	deliveryTimeout := min(eventDeliveryTimeout, hookDeliveryTimeout)
-	ctx, cancel := context.WithTimeout(hookCtx, deliveryTimeout)
-	defer cancel()
-	client := uplink.NewClient(config.uplinkConfig(&http.Client{Timeout: deliveryTimeout}))
-	eventQueue, err := openEventQueueContext(hookCtx, config)
-	if err != nil {
-		return err
-	}
-	defer eventQueue.Close()
-	if err := deliverCollectionWithQueueContext(
-		ctx,
-		hookCtx,
-		client,
-		eventQueue,
+	if err := deliverHookCollection(
+		config,
+		deliveryTimeout,
 		gateRepoAllowlist(collection.Events, config),
 		collection.UsageMetrics,
 	); err != nil {
@@ -401,15 +389,13 @@ func runClaudeHook(args []string, stdin io.Reader, stdout io.Writer, stderr io.W
 }
 
 func runCodexHook(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
-	hookCtx, stopHook := context.WithTimeout(context.Background(), hookProcessingTimeout)
-	defer stopHook()
 	flags := flag.NewFlagSet("codex-hook", flag.ContinueOnError)
 	adapterValues := addAdapterFlags(flags)
 	flags.SetOutput(stderr)
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	config, err := adapterValues.config(hookCtx)
+	config, err := adapterValues.config(context.Background())
 	if err != nil {
 		return err
 	}
@@ -437,19 +423,9 @@ func runCodexHook(args []string, stdin io.Reader, stdout io.Writer, stderr io.Wr
 		collection.Events = omitTerminalEventsForWaitingUser(collection.Events, transcriptCollection.Events)
 	}
 	deliveryTimeout := min(eventDeliveryTimeout, hookDeliveryTimeout)
-	ctx, cancel := context.WithTimeout(hookCtx, deliveryTimeout)
-	defer cancel()
-	client := uplink.NewClient(config.uplinkConfig(&http.Client{Timeout: deliveryTimeout}))
-	eventQueue, err := openEventQueueContext(hookCtx, config)
-	if err != nil {
-		return err
-	}
-	defer eventQueue.Close()
-	if err := deliverCollectionWithQueueContext(
-		ctx,
-		hookCtx,
-		client,
-		eventQueue,
+	if err := deliverHookCollection(
+		config,
+		deliveryTimeout,
 		gateRepoAllowlist(collection.Events, config),
 		collection.UsageMetrics,
 	); err != nil {
@@ -547,18 +523,10 @@ func collectAndDeliverCursorHook(
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	client := uplink.NewClient(config.uplinkConfig(&http.Client{Timeout: timeout}))
-	eventQueue, err := openEventQueue(config)
-	if err != nil {
-		return err
-	}
-	defer eventQueue.Close()
-	if err := deliverCollection(
-		ctx,
-		client,
-		eventQueue,
+	deliveryTimeout := min(timeout, hookDeliveryTimeout)
+	if err := deliverHookCollection(
+		config,
+		deliveryTimeout,
 		gateRepoAllowlist(collection.Events, config),
 		collection.UsageMetrics,
 	); err != nil {
@@ -1147,13 +1115,74 @@ func writeDoctorDenyStatus(configPath string, stdout io.Writer) error {
 }
 
 const (
-	hookDeliveryTimeout   = 50 * time.Millisecond
-	hookProcessingTimeout = 350 * time.Millisecond
+	hookCollectionTimeout = 350 * time.Millisecond
+	hookDeliveryTimeout   = 200 * time.Millisecond
 	queueDrainInterval    = time.Minute
 	queueWriteTimeout     = 250 * time.Millisecond
 )
 
 var eventDeliveryTimeout = 2 * time.Second
+
+func deliverHookCollection(
+	config daemonAdapterConfig,
+	deliveryTimeout time.Duration,
+	events []contracts.AgentEvent,
+	metrics []contracts.UsageMetric,
+) error {
+	hookCtx, stopHook := context.WithTimeout(context.Background(), hookCollectionTimeout)
+	defer stopHook()
+	client := uplink.NewClient(config.uplinkConfig(&http.Client{Timeout: deliveryTimeout}))
+	versionedEvents := withCollectorVersion(events, version.Current().Version)
+	if err := sendHookEventsOrQueue(hookCtx, config, deliveryTimeout, client, versionedEvents); err != nil {
+		return err
+	}
+	if len(metrics) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(hookCtx, deliveryTimeout)
+	defer cancel()
+	counts, err := client.SendUsage(ctx, metrics)
+	if err != nil {
+		return err
+	}
+	if counts.Accepted+counts.Duplicated != len(metrics) || counts.Rejected > 0 {
+		return fmt.Errorf("collector usage metrics not fully accepted")
+	}
+
+	return nil
+}
+
+func sendHookEventsOrQueue(
+	hookCtx context.Context,
+	config daemonAdapterConfig,
+	deliveryTimeout time.Duration,
+	client uplink.Client,
+	events []contracts.AgentEvent,
+) error {
+	if len(events) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(hookCtx, deliveryTimeout)
+	counts, sendErr := client.SendEvents(ctx, events)
+	cancel()
+	if sendErr == nil && counts.Accepted+counts.Duplicated == len(events) && counts.Rejected == 0 {
+		return nil
+	}
+	if sendErr == nil {
+		sendErr = fmt.Errorf("collector events not fully accepted")
+	}
+
+	eventQueue, queueErr := openEventQueueContext(hookCtx, config)
+	if queueErr != nil {
+		return errors.Join(sendErr, fmt.Errorf("open collector event queue: %w", queueErr))
+	}
+	defer eventQueue.Close()
+	if queueErr := enqueueEvents(hookCtx, eventQueue, events); queueErr != nil {
+		return errors.Join(sendErr, queueErr)
+	}
+
+	return nil
+}
 
 func deliverCollection(
 	ctx context.Context,
@@ -1162,32 +1191,8 @@ func deliverCollection(
 	events []contracts.AgentEvent,
 	metrics []contracts.UsageMetric,
 ) error {
-	return deliverCollectionWithQueueContext(
-		ctx,
-		nil,
-		client,
-		eventQueue,
-		events,
-		metrics,
-	)
-}
-
-func deliverCollectionWithQueueContext(
-	ctx context.Context,
-	queueCtx context.Context,
-	client uplink.Client,
-	eventQueue *queue.Store,
-	events []contracts.AgentEvent,
-	metrics []contracts.UsageMetric,
-) error {
 	versionedEvents := withCollectorVersion(events, version.Current().Version)
-	var err error
-	if queueCtx == nil {
-		err = sendEventsOrQueue(ctx, client, eventQueue, versionedEvents)
-	} else {
-		err = sendEventsOrQueueContext(ctx, queueCtx, client, eventQueue, versionedEvents)
-	}
-	if err != nil {
+	if err := sendEventsOrQueue(ctx, client, eventQueue, versionedEvents); err != nil {
 		return err
 	}
 	if len(metrics) > 0 {
