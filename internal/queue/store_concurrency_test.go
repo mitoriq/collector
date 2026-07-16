@@ -121,6 +121,81 @@ func TestOpenConfiguresConcurrentWritePragmas(t *testing.T) {
 	}
 }
 
+func TestOpenCanSkipJournalModeConfiguration(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "queue.db"), Options{
+		SkipJournalModeConfiguration: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	var busyTimeout int
+	if err := store.db.QueryRowContext(context.Background(), `PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if busyTimeout != int(sqliteBusyTimeout/time.Millisecond) {
+		t.Fatalf("busy timeout = %d, want %d", busyTimeout, sqliteBusyTimeout/time.Millisecond)
+	}
+
+	var journalMode string
+	if err := store.db.QueryRowContext(context.Background(), `PRAGMA journal_mode`).Scan(&journalMode); err != nil {
+		t.Fatal(err)
+	}
+	if journalMode != "delete" {
+		t.Fatalf("journal mode = %q, want delete", journalMode)
+	}
+
+	event := contracts.AgentEvent{IdempotencyKey: "hook-fallback"}
+	if _, err := store.Enqueue(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	records, err := store.Due(context.Background(), 1, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Event.IdempotencyKey != event.IdempotencyKey {
+		t.Fatalf("queued records = %#v, want hook fallback event", records)
+	}
+}
+
+func TestOpenSkippingJournalModePreservesExistingWAL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "queue.db")
+	normalStore, err := Open(path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer normalStore.Close()
+
+	hookStore, err := Open(path, Options{
+		SkipJournalModeConfiguration: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hookStore.Close()
+
+	var journalMode string
+	if err := hookStore.db.QueryRowContext(context.Background(), `PRAGMA journal_mode`).Scan(&journalMode); err != nil {
+		t.Fatal(err)
+	}
+	if journalMode != "wal" {
+		t.Fatalf("journal mode = %q, want wal", journalMode)
+	}
+
+	event := contracts.AgentEvent{IdempotencyKey: "existing-wal"}
+	if _, err := hookStore.Enqueue(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	records, err := normalStore.Due(context.Background(), 1, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Event.IdempotencyKey != event.IdempotencyKey {
+		t.Fatalf("queued records = %#v, want existing WAL event", records)
+	}
+}
+
 func TestOpenMigratesToWALAfterConcurrentDeleteJournalWriter(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "queue.db")
 	seedStore, err := Open(path, Options{})

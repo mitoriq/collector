@@ -700,7 +700,7 @@ func TestSendHookEventsOrQueueOpensQueueWhileDeliveryIsPending(t *testing.T) {
 		[]contracts.AgentEvent{{IdempotencyKey: "concurrent-open"}},
 		func(ctx context.Context, config daemonAdapterConfig) (*queue.Store, error) {
 			close(queueOpenStarted)
-			return openEventQueueContext(ctx, config)
+			return openHookEventQueueContext(ctx, config)
 		},
 	)
 

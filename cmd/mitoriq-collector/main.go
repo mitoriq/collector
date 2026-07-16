@@ -1165,7 +1165,7 @@ func sendHookEventsOrQueue(
 		deliveryTimeout,
 		client,
 		events,
-		openEventQueueContext,
+		openHookEventQueueContext,
 	)
 }
 
@@ -1317,11 +1317,28 @@ func openEventQueueContext(
 	ctx context.Context,
 	config daemonAdapterConfig,
 ) (*queue.Store, error) {
+	return openEventQueueContextWithOptions(ctx, config, queue.Options{})
+}
+
+func openHookEventQueueContext(
+	ctx context.Context,
+	config daemonAdapterConfig,
+) (*queue.Store, error) {
+	return openEventQueueContextWithOptions(ctx, config, queue.Options{
+		SkipJournalModeConfiguration: true,
+	})
+}
+
+func openEventQueueContextWithOptions(
+	ctx context.Context,
+	config daemonAdapterConfig,
+	options queue.Options,
+) (*queue.Store, error) {
 	auditPath := (localaudit.Store{Path: config.AuditLogPath}).ResolvedPath()
 	return queue.OpenContext(
 		ctx,
 		filepath.Join(filepath.Dir(auditPath), "collector-queue.db"),
-		queue.Options{},
+		options,
 	)
 }
 

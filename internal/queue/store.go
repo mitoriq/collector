@@ -29,6 +29,8 @@ const (
 type Options struct {
 	KeyGenerator KeyGenerator
 	Now          func() time.Time
+	// SkipJournalModeConfiguration avoids a costly journal transition for latency-bounded hook fallback opens.
+	SkipJournalModeConfiguration bool
 }
 
 type Store struct {
@@ -90,7 +92,7 @@ func OpenContext(
 			return time.Now().UTC()
 		}
 	}
-	if err := store.configure(ctx); err != nil {
+	if err := store.configure(ctx, options.SkipJournalModeConfiguration); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -102,12 +104,18 @@ func OpenContext(
 	return store, nil
 }
 
-func (store *Store) configure(ctx context.Context) error {
+func (store *Store) configure(
+	ctx context.Context,
+	skipJournalModeConfiguration bool,
+) error {
 	if _, err := store.db.ExecContext(
 		ctx,
 		fmt.Sprintf(`PRAGMA busy_timeout = %d`, sqliteBusyTimeout/time.Millisecond),
 	); err != nil {
 		return fmt.Errorf("configure queue busy timeout: %w", err)
+	}
+	if skipJournalModeConfiguration {
+		return nil
 	}
 
 	return store.configureJournalMode(ctx)
