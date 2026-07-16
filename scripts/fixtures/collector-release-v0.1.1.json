@@ -1,0 +1,66 @@
+{
+  "artifacts": {
+    "linux": {
+      "amd64": {
+        "name": "mitoriq-collector_0.1.1_linux_amd64.tar.gz",
+        "sha256": "b58d734f8fc32551f2c284e0ce5a6f3807ff5084fc043f0fa3e3ae70852c5749",
+        "signatureUrl": "https://github.com/mitoriq/collector/releases/download/v0.1.1/mitoriq-collector_linux_amd64.sig",
+        "url": "https://github.com/mitoriq/collector/releases/download/v0.1.1/mitoriq-collector_0.1.1_linux_amd64.tar.gz"
+      },
+      "arm64": {
+        "name": "mitoriq-collector_0.1.1_linux_arm64.tar.gz",
+        "sha256": "023d9047fa88c7124c57f85831ddbfd7eac414451e7100c3825b70aa2bb26abb",
+        "signatureUrl": "https://github.com/mitoriq/collector/releases/download/v0.1.1/mitoriq-collector_linux_arm64.sig",
+        "url": "https://github.com/mitoriq/collector/releases/download/v0.1.1/mitoriq-collector_0.1.1_linux_arm64.tar.gz"
+      }
+    },
+    "macos": {
+      "amd64": {
+        "name": "mitoriq-collector_0.1.1_darwin_amd64.tar.gz",
+        "sha256": "c0f55e8c9ce8401599818becadadcb2e383d9b7aad8d0c0a99c0b3a16593cd0d",
+        "url": "https://github.com/mitoriq/collector/releases/download/v0.1.1/mitoriq-collector_0.1.1_darwin_amd64.tar.gz"
+      },
+      "arm64": {
+        "name": "mitoriq-collector_0.1.1_darwin_arm64.tar.gz",
+        "sha256": "e801fb4e850c2a1b3d17fc0bece6731a633e1ef8d1cb45e640d86816eae8909c",
+        "url": "https://github.com/mitoriq/collector/releases/download/v0.1.1/mitoriq-collector_0.1.1_darwin_arm64.tar.gz"
+      }
+    }
+  },
+  "install": {
+    "linux": {
+      "installerUrl": "https://raw.githubusercontent.com/mitoriq/collector/v0.1.1/scripts/install.sh",
+      "repositoryUrl": "https://github.com/mitoriq/collector/tree/v0.1.1"
+    },
+    "macos": {
+      "command": "brew install --cask mitoriq/tap/mitoriq-collector"
+    }
+  },
+  "publishedAt": "2026-07-16T13:26:25Z",
+  "releaseUrl": "https://github.com/mitoriq/collector/releases/tag/v0.1.1",
+  "schemaVersion": 1,
+  "source": {
+    "draft": false,
+    "prerelease": false,
+    "repository": "mitoriq/collector"
+  },
+  "trust": {
+    "cosignAlgorithm": "ECDSA P-256 / SHA-256",
+    "cosignPublicKeySha256": "4bfa1f0245bc7a0f735e10503773f8c8a0fe2f4d61b00a919f66e952dab6b36b",
+    "cosignPublicKeyUrl": "https://mitoriq.vercel.app/.well-known/collector-release-key.pem",
+    "cosignPublicKeys": [
+      {
+        "sha256": "4bfa1f0245bc7a0f735e10503773f8c8a0fe2f4d61b00a919f66e952dab6b36b",
+        "status": "current",
+        "url": "https://mitoriq.vercel.app/.well-known/collector-release-keys/4bfa1f0245bc7a0f735e10503773f8c8a0fe2f4d61b00a919f66e952dab6b36b.pem"
+      }
+    ],
+    "macosTeamId": "7FY7MQ69N4"
+  },
+  "verification": {
+    "checksumsSha256": "b0cfb719e5e622ff327e337d8d9f76ad5c488522377a227fa1a133395ebab9fa",
+    "checksumsSignatureUrl": "https://github.com/mitoriq/collector/releases/download/v0.1.1/checksums.txt.sig",
+    "checksumsUrl": "https://github.com/mitoriq/collector/releases/download/v0.1.1/checksums.txt"
+  },
+  "version": "0.1.1"
+}

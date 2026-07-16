@@ -28,6 +28,8 @@ import (
 	"github.com/mitoriq/collector/internal/version"
 )
 
+const maxHookFallbackDuration = time.Second
+
 func TestRunDoctorSubcommandReportsCollectorStatus(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	var stdout bytes.Buffer
@@ -538,7 +540,7 @@ func TestClaudeAndCodexHooksQueueEventsWhenTheUplinkTimesOut(t *testing.T) {
 			if err := test.run(args, strings.NewReader(test.body), &stdout, &stderr); err != nil {
 				t.Fatalf("run hook: %v", err)
 			}
-			if elapsed := time.Since(startedAt); elapsed > 500*time.Millisecond {
+			if elapsed := time.Since(startedAt); elapsed > maxHookFallbackDuration {
 				t.Fatalf("hook response exceeded queueing budget: %s", elapsed)
 			}
 			store, err := openEventQueue(daemonAdapterConfig{})
@@ -585,7 +587,7 @@ func TestClaudeHookReservesTimeToQueueWithDefaultDeliveryTimeout(t *testing.T) {
 	); err != nil {
 		t.Fatalf("run hook: %v", err)
 	}
-	if elapsed := time.Since(startedAt); elapsed >= 500*time.Millisecond {
+	if elapsed := time.Since(startedAt); elapsed >= maxHookFallbackDuration {
 		t.Fatalf("hook response exceeded queueing budget: %s", elapsed)
 	}
 	store, err := openEventQueue(daemonAdapterConfig{})
@@ -603,6 +605,8 @@ func TestClaudeHookReservesTimeToQueueWithDefaultDeliveryTimeout(t *testing.T) {
 }
 
 func TestRunClaudeHookWaitsForBriefAuditContentionBeforeQueueFallback(t *testing.T) {
+	const briefAuditContention = 25 * time.Millisecond
+
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	auditPath := filepath.Join(home, "collector-audit.jsonl")
@@ -621,10 +625,6 @@ func TestRunClaudeHookWaitsForBriefAuditContentionBeforeQueueFallback(t *testing
 	case <-time.After(time.Second):
 		t.Fatal("timed out acquiring holder lock")
 	}
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		close(release)
-	}()
 
 	requests := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
@@ -636,6 +636,10 @@ func TestRunClaudeHookWaitsForBriefAuditContentionBeforeQueueFallback(t *testing
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	startedAt := time.Now()
+	go func() {
+		time.Sleep(briefAuditContention)
+		close(release)
+	}()
 
 	err := runClaudeHook([]string{
 		"--api-url", server.URL,
@@ -723,6 +727,107 @@ func TestSendHookEventsOrQueueOpensQueueWhileDeliveryIsPending(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("queued events = %d, want 0 after direct delivery", count)
+	}
+}
+
+func TestSendHookEventsOrQueueReservesQueueBudgetAfterHookDeadline(t *testing.T) {
+	const expiredHookTimeout = 25 * time.Millisecond
+
+	queuePath := filepath.Join(t.TempDir(), "queue.db")
+	store, err := queue.Open(queuePath, queue.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(
+		http.ResponseWriter,
+		*http.Request,
+	) {
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+	client := uplink.NewClient(uplink.Config{
+		APIURL:            server.URL,
+		AllowInsecureHTTP: true,
+		HTTPClient:        server.Client(),
+	})
+	hookCtx, stopHook := context.WithTimeout(context.Background(), expiredHookTimeout)
+	defer stopHook()
+
+	err = sendHookEventsOrQueueWithOpener(
+		hookCtx,
+		daemonAdapterConfig{},
+		expiredHookTimeout,
+		client,
+		[]contracts.AgentEvent{{IdempotencyKey: "expired-hook-fallback"}},
+		func(context.Context, daemonAdapterConfig) (*queue.Store, error) {
+			<-hookCtx.Done()
+			return store, nil
+		},
+	)
+
+	if err != nil {
+		t.Fatalf("send hook events after delivery deadline: %v", err)
+	}
+	reopenedStore, err := queue.Open(queuePath, queue.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopenedStore.Close()
+	count, err := reopenedStore.Count(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("queued events = %d, want 1 after delivery deadline", count)
+	}
+}
+
+func TestSendHookEventsOrQueueStopsQueueOpenAfterFallbackBudget(t *testing.T) {
+	const (
+		slowDeliveryTimeout = time.Second
+		maxFallbackDuration = 750 * time.Millisecond
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		_ *http.Request,
+	) {
+		writer.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	client := uplink.NewClient(uplink.Config{
+		APIURL:            server.URL,
+		AllowInsecureHTTP: true,
+		HTTPClient:        server.Client(),
+	})
+	queueOpenStopped := make(chan struct{})
+	startedAt := time.Now()
+
+	err := sendHookEventsOrQueueWithOpener(
+		context.Background(),
+		daemonAdapterConfig{},
+		slowDeliveryTimeout,
+		client,
+		[]contracts.AgentEvent{{IdempotencyKey: "bounded-fallback-open"}},
+		func(ctx context.Context, _ daemonAdapterConfig) (*queue.Store, error) {
+			<-ctx.Done()
+			close(queueOpenStopped)
+			return nil, ctx.Err()
+		},
+	)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("queue open error = %v, want context deadline exceeded", err)
+	}
+	select {
+	case <-queueOpenStopped:
+	default:
+		t.Fatal("fallback queue opener was not joined after timeout")
+	}
+	if elapsed := time.Since(startedAt); elapsed >= maxFallbackDuration {
+		t.Fatalf("fallback queue open exceeded hook budget: %s", elapsed)
 	}
 }
 
@@ -834,7 +939,7 @@ func TestHookFallbackStopsWaitingWithinQueueBudget(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("enqueue error = %v, want context deadline exceeded", err)
 	}
-	if elapsed := time.Since(startedAt); elapsed >= 500*time.Millisecond {
+	if elapsed := time.Since(startedAt); elapsed >= maxHookFallbackDuration {
 		t.Fatalf("enqueue fallback exceeded hook budget: %s", elapsed)
 	}
 }
@@ -886,7 +991,7 @@ func TestClaudeHookReturnsWithinBudgetWhenQueueWriterStaysLocked(t *testing.T) {
 	if !strings.Contains(err.Error(), "enqueue collector event") {
 		t.Fatalf("hook error = %v, want queue persistence failure", err)
 	}
-	if elapsed := time.Since(startedAt); elapsed >= 500*time.Millisecond {
+	if elapsed := time.Since(startedAt); elapsed >= maxHookFallbackDuration {
 		t.Fatalf("hook response exceeded queueing budget: %s", elapsed)
 	}
 	if err := transaction.Rollback(); err != nil {
@@ -974,7 +1079,7 @@ func TestClaudeHookReturnsWithinBudgetWhenUplinkAndQueueWriterStayBlocked(t *tes
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("hook error = %v, want context deadline exceeded", err)
 	}
-	if elapsed := time.Since(startedAt); elapsed >= 500*time.Millisecond {
+	if elapsed := time.Since(startedAt); elapsed >= maxHookFallbackDuration {
 		t.Fatalf("hook response exceeded queueing budget: %s", elapsed)
 	}
 }
@@ -1080,7 +1185,7 @@ func TestRunCursorHookFailsOpenWhenTelemetryUploadStalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hook blocked Cursor: %v", err)
 	}
-	if elapsed := time.Since(startedAt); elapsed > 500*time.Millisecond {
+	if elapsed := time.Since(startedAt); elapsed > maxHookFallbackDuration {
 		t.Fatalf("hook response exceeded fail-open budget: %s", elapsed)
 	}
 	if strings.TrimSpace(stdout.String()) != `{"continue":true}` {
@@ -1132,7 +1237,7 @@ func TestRunCursorHookUsesBoundedDefaultDeliveryTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hook blocked Cursor: %v", err)
 	}
-	if elapsed := time.Since(startedAt); elapsed > 500*time.Millisecond {
+	if elapsed := time.Since(startedAt); elapsed > maxHookFallbackDuration {
 		t.Fatalf("hook response exceeded fail-open budget: %s", elapsed)
 	}
 	if strings.TrimSpace(stdout.String()) != `{"continue":true}` {
@@ -1216,7 +1321,7 @@ func TestRunCursorHookFailsOpenWhenAuditLockIsContended(t *testing.T) {
 		if err != nil {
 			t.Fatalf("hook blocked Cursor: %v", err)
 		}
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(maxHookFallbackDuration):
 		releaseHolder()
 		select {
 		case <-done:

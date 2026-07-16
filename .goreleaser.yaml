@@ -162,6 +162,7 @@ release:
 
 homebrew_casks:
   - name: mitoriq-collector
+    skip_upload: auto
     ids:
       - binary-archives-darwin
     binaries:
@@ -178,7 +179,9 @@ homebrew_casks:
           owner: mitoriq
           name: homebrew-tap
           branch: main
+    url:
+      verified: github.com/mitoriq/collector/
     directory: Casks
-    homepage: https://github.com/mitoriq/collector
+    homepage: https://mitoriq.vercel.app/collector
     description: Metadata-only local collector for Mitoriq
     license: Apache-2.0
