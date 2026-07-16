@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -208,15 +209,22 @@ func TestRunInstallForDarwinWritesLaunchdPlistAndBootstrapsNewService(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !lockDirectoryInfo.IsDir() || lockDirectoryInfo.Mode().Perm() != 0o700 {
-		t.Fatalf("lock directory mode = %v, want directory 0700", lockDirectoryInfo.Mode())
+	if !lockDirectoryInfo.IsDir() {
+		t.Fatalf("lock directory mode = %v, want directory", lockDirectoryInfo.Mode())
+	}
+	// Windows FileMode does not expose the POSIX permissions enforced on macOS.
+	if runtime.GOOS != "windows" && lockDirectoryInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("lock directory mode = %v, want 0700", lockDirectoryInfo.Mode())
 	}
 	lockInfo, err := os.Lstat(defaultLaunchdLifecycleLockPath())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !lockInfo.Mode().IsRegular() || lockInfo.Mode().Perm() != 0o600 {
-		t.Fatalf("lock file mode = %v, want regular file 0600", lockInfo.Mode())
+	if !lockInfo.Mode().IsRegular() {
+		t.Fatalf("lock file mode = %v, want regular file", lockInfo.Mode())
+	}
+	if runtime.GOOS != "windows" && lockInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("lock file mode = %v, want 0600", lockInfo.Mode())
 	}
 	expectedCalls := []recordedCommand{
 		{name: "launchctl", args: []string{"print", "gui/501/com.mitoriq.collector"}},

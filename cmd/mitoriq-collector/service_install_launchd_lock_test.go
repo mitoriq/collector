@@ -228,7 +228,9 @@ func TestRunInstallForDarwinRejectsSymlinkLifecycleLockFile(t *testing.T) {
 		"--tools", "claude",
 	}, &stdout, &stderr, "darwin", runner, "501")
 
-	if err == nil || !strings.Contains(err.Error(), "open file lock") {
+	if err == nil ||
+		(!strings.Contains(err.Error(), "open file lock: too many levels of symbolic links") &&
+			!strings.Contains(err.Error(), "file lock must not be a symlink")) {
 		t.Fatalf("err = %v", err)
 	}
 	if count := runner.callCount(); count != 0 {
