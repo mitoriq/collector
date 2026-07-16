@@ -29,7 +29,7 @@ import (
 )
 
 func TestRunDoctorSubcommandReportsCollectorStatus(t *testing.T) {
-	setTestUserHome(t)
+	t.Setenv("HOME", t.TempDir())
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
@@ -288,7 +288,7 @@ func TestRunClaudeHookSendsMetadataOnlyEvent(t *testing.T) {
 }
 
 func TestRunCursorHookSendsCurrentLifecycleEventBehindBetaFlag(t *testing.T) {
-	setTestUserHome(t)
+	t.Setenv("HOME", t.TempDir())
 	var received contracts.CollectorBatch
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if err := json.NewDecoder(request.Body).Decode(&received); err != nil {
@@ -368,7 +368,7 @@ func TestRunCursorHookFailsOpenWhenTelemetryInputIsInvalid(t *testing.T) {
 }
 
 func TestRunCursorHookFailsOpenWhenTelemetryUploadFails(t *testing.T) {
-	setTestUserHome(t)
+	t.Setenv("HOME", t.TempDir())
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = writer.Write([]byte(`{"error":"temporarily unavailable"}`))
@@ -449,7 +449,7 @@ func TestHooksPersistEventsWhenTheUplinkIsUnavailable(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			setTestUserHome(t)
+			t.Setenv("HOME", t.TempDir())
 			var sent contracts.CollectorBatch
 			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				if err := json.NewDecoder(request.Body).Decode(&sent); err != nil {
@@ -518,7 +518,7 @@ func TestClaudeAndCodexHooksQueueEventsWhenTheUplinkTimesOut(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			setTestUserHome(t)
+			t.Setenv("HOME", t.TempDir())
 			release := make(chan struct{})
 			server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 				<-release
@@ -638,7 +638,7 @@ func TestHooksBoundFallbackFromValidatedConfig(t *testing.T) {
 }
 
 func TestClaudeHookReservesTimeToQueueWithDefaultDeliveryTimeout(t *testing.T) {
-	setTestUserHome(t)
+	t.Setenv("HOME", t.TempDir())
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		<-release
@@ -683,7 +683,8 @@ func TestClaudeHookReservesTimeToQueueWithDefaultDeliveryTimeout(t *testing.T) {
 }
 
 func TestRunClaudeHookWaitsForBriefAuditContentionBeforeQueueFallback(t *testing.T) {
-	home := setTestUserHome(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	auditPath := filepath.Join(home, "collector-audit.jsonl")
 	locked := make(chan struct{})
 	release := make(chan struct{})
@@ -746,7 +747,8 @@ func TestRunClaudeHookWaitsForBriefAuditContentionBeforeQueueFallback(t *testing
 }
 
 func TestSendHookEventsOrQueueOpensQueueWhileDeliveryIsPending(t *testing.T) {
-	home := setTestUserHome(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	config := daemonAdapterConfig{
 		AuditLogPath: filepath.Join(home, "collector-audit.jsonl"),
 	}
@@ -871,60 +873,45 @@ func TestSendHookEventsOrQueueRejectsNilQueueAfterDeliveryFailure(t *testing.T) 
 	}
 }
 
-func TestSendHookEventsOrQueueUsesFallbackContextAfterDeliveryDeadline(t *testing.T) {
-	setTestUserHome(t)
-	config := daemonAdapterConfig{}
-	deliveryCtx, stopDelivery := context.WithCancel(context.Background())
-	stopDelivery()
-	fallbackCtx, stopFallback := context.WithTimeout(context.Background(), time.Second)
-	defer stopFallback()
-	queueOpen := startHookQueueOpen(fallbackCtx, config, openHookEventQueueContext)
-	defer queueOpen.close()
+func TestHookDirectDeliveryTimeoutReservesQueueFallback(t *testing.T) {
+	tests := []struct {
+		name      string
+		remaining time.Duration
+		want      time.Duration
+	}{
+		{
+			name:      "full budget",
+			remaining: hookCollectionTimeout,
+			want:      hookDeliveryTimeout,
+		},
+		{
+			name:      "elapsed collection reduces delivery",
+			remaining: 250 * time.Millisecond,
+			want:      150 * time.Millisecond,
+		},
+		{
+			name:      "queue reserve remains",
+			remaining: hookQueueReserve,
+			want:      0,
+		},
+		{
+			name:      "less than queue reserve remains",
+			remaining: 50 * time.Millisecond,
+			want:      0,
+		},
+	}
 
-	err := sendHookEventsOrQueueWithFuture(
-		deliveryCtx,
-		fallbackCtx,
-		hookDeliveryTimeout,
-		testClient("http://127.0.0.1:1"),
-		[]contracts.AgentEvent{{IdempotencyKey: "expired-delivery-live-fallback"}},
-		queueOpen,
-	)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := hookDirectDeliveryTimeoutForRemaining(test.remaining, hookDeliveryTimeout)
+			if got != test.want {
+				t.Fatalf("delivery timeout = %s, want %s", got, test.want)
+			}
+		})
+	}
 
-	if err != nil {
-		t.Fatalf("send hook events: %v", err)
-	}
-	store, err := openEventQueue(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	count, err := store.Count(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if count != 1 {
-		t.Fatalf("queued events = %d, want 1", count)
-	}
-}
-
-func TestHookResponseBudgetReservesFallbackWithinHostContract(t *testing.T) {
-	const hostResponseTimeout = 500 * time.Millisecond
-	if hookCollectionTimeout >= hookResponseTimeout {
-		t.Fatalf(
-			"collection timeout = %s, response timeout = %s",
-			hookCollectionTimeout,
-			hookResponseTimeout,
-		)
-	}
-	if reserve := hookResponseTimeout - hookCollectionTimeout; reserve != 100*time.Millisecond {
-		t.Fatalf("fallback reserve = %s, want 100ms", reserve)
-	}
-	if hookResponseTimeout >= hostResponseTimeout {
-		t.Fatalf(
-			"response timeout = %s, host contract = %s",
-			hookResponseTimeout,
-			hostResponseTimeout,
-		)
+	if got := hookDirectDeliveryTimeout(context.Background(), 175*time.Millisecond); got != 175*time.Millisecond {
+		t.Fatalf("delivery timeout without deadline = %s, want 175ms", got)
 	}
 }
 
@@ -980,7 +967,8 @@ func TestClaudeHookReturnsWithinBudgetWhenQueueWriterStaysLocked(t *testing.T) {
 	t.Cleanup(func() {
 		eventDeliveryTimeout = previousTimeout
 	})
-	home := setTestUserHome(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	store, err := openEventQueue(daemonAdapterConfig{})
 	if err != nil {
 		t.Fatal(err)
@@ -1054,7 +1042,8 @@ func TestClaudeHookReturnsWithinBudgetWhenQueueWriterStaysLocked(t *testing.T) {
 }
 
 func TestClaudeHookReturnsWithinBudgetWhenUplinkAndQueueWriterStayBlocked(t *testing.T) {
-	home := setTestUserHome(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	store, err := openEventQueue(daemonAdapterConfig{})
 	if err != nil {
 		t.Fatal(err)
@@ -1125,7 +1114,7 @@ func hookFailureArgs() []string {
 }
 
 func TestRunQueueDrainLoopDeliversPersistedEvents(t *testing.T) {
-	setTestUserHome(t)
+	t.Setenv("HOME", t.TempDir())
 	store, err := openEventQueue(daemonAdapterConfig{ConfigPath: filepath.Join(t.TempDir(), "collector.json")})
 	if err != nil {
 		t.Fatal(err)
@@ -1185,7 +1174,7 @@ func TestRunQueueDrainLoopDeliversPersistedEvents(t *testing.T) {
 }
 
 func TestRunCursorHookFailsOpenWhenTelemetryUploadStalls(t *testing.T) {
-	setTestUserHome(t)
+	t.Setenv("HOME", t.TempDir())
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		<-release
@@ -1237,7 +1226,7 @@ func TestRunCursorHookFailsOpenWhenTelemetryUploadStalls(t *testing.T) {
 }
 
 func TestRunCursorHookUsesBoundedDefaultDeliveryTimeout(t *testing.T) {
-	setTestUserHome(t)
+	t.Setenv("HOME", t.TempDir())
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		<-release
@@ -1289,7 +1278,8 @@ func TestRunCursorHookUsesBoundedDefaultDeliveryTimeout(t *testing.T) {
 }
 
 func TestRunCursorHookFailsOpenWhenAuditLockIsContended(t *testing.T) {
-	home := setTestUserHome(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	auditPath := filepath.Join(home, "collector-audit.jsonl")
 	locked := make(chan struct{})
 	release := make(chan struct{})
@@ -1379,7 +1369,7 @@ func TestRunCursorHookFailsOpenWhenAuditLockIsContended(t *testing.T) {
 }
 
 func TestRunClaudeHookRequiresAdapterConfig(t *testing.T) {
-	setTestUserHome(t)
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PATH", t.TempDir())
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -1395,7 +1385,8 @@ func TestRunClaudeHookRequiresAdapterConfig(t *testing.T) {
 }
 
 func TestRunClaudeHookUsesSavedConfigAndToken(t *testing.T) {
-	home := setTestUserHome(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	t.Setenv("PATH", t.TempDir())
 	token := "mtq_e_token_secret"
 	writeFallbackToken(t, home, token)
@@ -1446,7 +1437,8 @@ func TestRunClaudeHookUsesSavedConfigAndToken(t *testing.T) {
 }
 
 func TestRunClaudeHookPrefersOrganizationScopedToken(t *testing.T) {
-	home := setTestUserHome(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	t.Setenv("PATH", t.TempDir())
 	writeFallbackToken(t, home, "legacy-token")
 	writeOrganizationToken(t, home, "org-1", "org-token")
@@ -2347,7 +2339,7 @@ func TestRunEnrollRequiresBootstrapCode(t *testing.T) {
 }
 
 func TestRunEnrollStoresTokenWithoutPrintingSecret(t *testing.T) {
-	setTestUserHome(t)
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PATH", t.TempDir())
 	if err := (localconfig.Store{}).Save(localconfig.Config{UpdateChannel: localconfig.UpdateChannelStable}); err != nil {
 		t.Fatal(err)

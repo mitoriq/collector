@@ -1120,7 +1120,7 @@ func writeDoctorDenyStatus(configPath string, stdout io.Writer) error {
 const (
 	hookCollectionTimeout = 350 * time.Millisecond
 	hookDeliveryTimeout   = 200 * time.Millisecond
-	hookResponseTimeout   = 450 * time.Millisecond
+	hookQueueReserve      = 100 * time.Millisecond
 	queueDrainInterval    = time.Minute
 	queueWriteTimeout     = 250 * time.Millisecond
 )
@@ -1128,32 +1128,26 @@ const (
 var eventDeliveryTimeout = 2 * time.Second
 
 type hookDeliverySession struct {
-	config       daemonAdapterConfig
-	deliveryCtx  context.Context
-	stopDelivery context.CancelFunc
-	fallbackCtx  context.Context
-	stopFallback context.CancelFunc
-	queueOpen    *hookQueueOpenFuture
+	config    daemonAdapterConfig
+	hookCtx   context.Context
+	stopHook  context.CancelFunc
+	queueOpen *hookQueueOpenFuture
 }
 
 func startHookDeliverySession(config daemonAdapterConfig) *hookDeliverySession {
-	fallbackCtx, stopFallback := context.WithTimeout(context.Background(), hookResponseTimeout)
-	deliveryCtx, stopDelivery := context.WithTimeout(fallbackCtx, hookCollectionTimeout)
+	hookCtx, stopHook := context.WithTimeout(context.Background(), hookCollectionTimeout)
 
 	return &hookDeliverySession{
-		config:       config,
-		deliveryCtx:  deliveryCtx,
-		stopDelivery: stopDelivery,
-		fallbackCtx:  fallbackCtx,
-		stopFallback: stopFallback,
-		queueOpen:    startHookQueueOpen(fallbackCtx, config, openHookEventQueueContext),
+		config:    config,
+		hookCtx:   hookCtx,
+		stopHook:  stopHook,
+		queueOpen: startHookQueueOpen(hookCtx, config, openHookEventQueueContext),
 	}
 }
 
 func (session *hookDeliverySession) close() {
 	session.queueOpen.close()
-	session.stopDelivery()
-	session.stopFallback()
+	session.stopHook()
 }
 
 func (session *hookDeliverySession) deliver(
@@ -1164,8 +1158,7 @@ func (session *hookDeliverySession) deliver(
 	client := uplink.NewClient(session.config.uplinkConfig(&http.Client{Timeout: deliveryTimeout}))
 	versionedEvents := withCollectorVersion(events, version.Current().Version)
 	if err := sendHookEventsOrQueueWithFuture(
-		session.deliveryCtx,
-		session.fallbackCtx,
+		session.hookCtx,
 		deliveryTimeout,
 		client,
 		versionedEvents,
@@ -1176,7 +1169,7 @@ func (session *hookDeliverySession) deliver(
 	if len(metrics) == 0 {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(session.deliveryCtx, deliveryTimeout)
+	ctx, cancel := context.WithTimeout(session.hookCtx, deliveryTimeout)
 	defer cancel()
 	counts, err := client.SendUsage(ctx, metrics)
 	if err != nil {
@@ -1253,7 +1246,6 @@ func sendHookEventsOrQueueWithOpener(
 
 	return sendHookEventsOrQueueWithFuture(
 		hookCtx,
-		hookCtx,
 		deliveryTimeout,
 		client,
 		events,
@@ -1262,8 +1254,7 @@ func sendHookEventsOrQueueWithOpener(
 }
 
 func sendHookEventsOrQueueWithFuture(
-	deliveryCtx context.Context,
-	fallbackCtx context.Context,
+	hookCtx context.Context,
 	deliveryTimeout time.Duration,
 	client uplink.Client,
 	events []contracts.AgentEvent,
@@ -1274,7 +1265,10 @@ func sendHookEventsOrQueueWithFuture(
 	}
 	defer queueOpen.close()
 
-	ctx, cancel := context.WithTimeout(deliveryCtx, deliveryTimeout)
+	ctx, cancel := context.WithTimeout(
+		hookCtx,
+		hookDirectDeliveryTimeout(hookCtx, deliveryTimeout),
+	)
 	counts, sendErr := client.SendEvents(ctx, events)
 	cancel()
 	if sendErr == nil && counts.Accepted+counts.Duplicated == len(events) && counts.Rejected == 0 {
@@ -1291,11 +1285,31 @@ func sendHookEventsOrQueueWithFuture(
 	if result.store == nil {
 		return errors.Join(sendErr, fmt.Errorf("open collector event queue: returned nil store"))
 	}
-	if queueErr := enqueueEvents(fallbackCtx, result.store, events); queueErr != nil {
+	if queueErr := enqueueEvents(hookCtx, result.store, events); queueErr != nil {
 		return errors.Join(sendErr, queueErr)
 	}
 
 	return nil
+}
+
+func hookDirectDeliveryTimeout(hookCtx context.Context, deliveryTimeout time.Duration) time.Duration {
+	deadline, hasDeadline := hookCtx.Deadline()
+	if !hasDeadline {
+		return deliveryTimeout
+	}
+	return hookDirectDeliveryTimeoutForRemaining(time.Until(deadline), deliveryTimeout)
+}
+
+func hookDirectDeliveryTimeoutForRemaining(
+	remaining time.Duration,
+	deliveryTimeout time.Duration,
+) time.Duration {
+	available := remaining - hookQueueReserve
+	if available <= 0 {
+		return 0
+	}
+
+	return min(deliveryTimeout, available)
 }
 
 func closeHookQueue(eventQueue *queue.Store) {
