@@ -23,6 +23,7 @@ import (
 	"github.com/mitoriq/collector/internal/localconfig"
 	"github.com/mitoriq/collector/internal/queue"
 	"github.com/mitoriq/collector/internal/uplink"
+	"github.com/mitoriq/collector/internal/version"
 )
 
 func TestRunDoctorSubcommandReportsCollectorStatus(t *testing.T) {
@@ -1548,6 +1549,30 @@ func TestDeliverCollectionQueuesPartialEventAcceptance(t *testing.T) {
 	}
 	if len(records) != 1 || records[0].Event.IdempotencyKey != event.IdempotencyKey {
 		t.Fatalf("persisted events = %#v", records)
+	}
+	if records[0].Event.CollectorVersion != version.Current().Version {
+		t.Fatalf("collector version = %q", records[0].Event.CollectorVersion)
+	}
+}
+
+func TestDeliverCollectionPreservesAnEventCollectorVersion(t *testing.T) {
+	var received contracts.CollectorBatch
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if err := json.NewDecoder(request.Body).Decode(&received); err != nil {
+			t.Fatal(err)
+		}
+		writer.Header().Set("content-type", "application/json")
+		_, _ = writer.Write([]byte(`{"accepted":1,"duplicated":0,"rejected":0}`))
+	}))
+	defer server.Close()
+	event := testEvent()
+	event.CollectorVersion = "0.1.3"
+
+	if err := deliverCollection(nilContext(), testClient(server.URL), nil, []contracts.AgentEvent{event}, nil); err != nil {
+		t.Fatalf("deliver collection: %v", err)
+	}
+	if len(received.Events) != 1 || received.Events[0].CollectorVersion != "0.1.3" {
+		t.Fatalf("received events = %#v", received.Events)
 	}
 }
 
