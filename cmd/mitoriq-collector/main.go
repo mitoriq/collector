@@ -1159,29 +1159,79 @@ func sendHookEventsOrQueue(
 	client uplink.Client,
 	events []contracts.AgentEvent,
 ) error {
+	return sendHookEventsOrQueueWithOpener(
+		hookCtx,
+		config,
+		deliveryTimeout,
+		client,
+		events,
+		openEventQueueContext,
+	)
+}
+
+type hookQueueOpener func(
+	context.Context,
+	daemonAdapterConfig,
+) (*queue.Store, error)
+
+type hookQueueOpenResult struct {
+	store *queue.Store
+	err   error
+}
+
+func sendHookEventsOrQueueWithOpener(
+	hookCtx context.Context,
+	config daemonAdapterConfig,
+	deliveryTimeout time.Duration,
+	client uplink.Client,
+	events []contracts.AgentEvent,
+	openQueue hookQueueOpener,
+) error {
 	if len(events) == 0 {
 		return nil
 	}
+	queueCtx, stopQueue := context.WithCancel(hookCtx)
+	defer stopQueue()
+	queueResult := make(chan hookQueueOpenResult, 1)
+	go func() {
+		eventQueue, err := openQueue(queueCtx, config)
+		queueResult <- hookQueueOpenResult{store: eventQueue, err: err}
+	}()
+
 	ctx, cancel := context.WithTimeout(hookCtx, deliveryTimeout)
 	counts, sendErr := client.SendEvents(ctx, events)
 	cancel()
 	if sendErr == nil && counts.Accepted+counts.Duplicated == len(events) && counts.Rejected == 0 {
+		stopQueue()
+		result := <-queueResult
+		closeHookQueue(result.store)
 		return nil
 	}
 	if sendErr == nil {
 		sendErr = fmt.Errorf("collector events not fully accepted")
 	}
 
-	eventQueue, queueErr := openEventQueueContext(hookCtx, config)
-	if queueErr != nil {
-		return errors.Join(sendErr, fmt.Errorf("open collector event queue: %w", queueErr))
+	result := <-queueResult
+	if result.err != nil {
+		closeHookQueue(result.store)
+		return errors.Join(sendErr, fmt.Errorf("open collector event queue: %w", result.err))
 	}
-	defer eventQueue.Close()
-	if queueErr := enqueueEvents(hookCtx, eventQueue, events); queueErr != nil {
+	if result.store == nil {
+		return errors.Join(sendErr, fmt.Errorf("open collector event queue: returned nil store"))
+	}
+	if queueErr := enqueueEvents(hookCtx, result.store, events); queueErr != nil {
+		closeHookQueue(result.store)
 		return errors.Join(sendErr, queueErr)
 	}
+	closeHookQueue(result.store)
 
 	return nil
+}
+
+func closeHookQueue(eventQueue *queue.Store) {
+	if eventQueue != nil {
+		_ = eventQueue.Close()
+	}
 }
 
 func deliverCollection(

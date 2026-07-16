@@ -666,6 +666,133 @@ func TestRunClaudeHookWaitsForBriefAuditContentionBeforeQueueFallback(t *testing
 	}
 }
 
+func TestSendHookEventsOrQueueOpensQueueWhileDeliveryIsPending(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	config := daemonAdapterConfig{
+		AuditLogPath: filepath.Join(home, "collector-audit.jsonl"),
+	}
+	queueOpenStarted := make(chan struct{})
+	directDelivered := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		select {
+		case <-queueOpenStarted:
+			writer.Header().Set("content-type", "application/json")
+			_, _ = writer.Write([]byte(`{"accepted":1,"duplicated":0,"rejected":0}`))
+			close(directDelivered)
+		case <-request.Context().Done():
+		}
+	}))
+	defer server.Close()
+	client := uplink.NewClient(uplink.Config{
+		APIURL:            server.URL,
+		AllowInsecureHTTP: true,
+		HTTPClient:        &http.Client{Timeout: hookDeliveryTimeout},
+	})
+	hookCtx, stopHook := context.WithTimeout(context.Background(), hookCollectionTimeout)
+	defer stopHook()
+
+	err := sendHookEventsOrQueueWithOpener(
+		hookCtx,
+		config,
+		hookDeliveryTimeout,
+		client,
+		[]contracts.AgentEvent{{IdempotencyKey: "concurrent-open"}},
+		func(ctx context.Context, config daemonAdapterConfig) (*queue.Store, error) {
+			close(queueOpenStarted)
+			return openEventQueueContext(ctx, config)
+		},
+	)
+
+	if err != nil {
+		t.Fatalf("send hook events: %v", err)
+	}
+	select {
+	case <-directDelivered:
+	default:
+		t.Fatal("queue initialization did not overlap direct delivery")
+	}
+	store, err := openEventQueue(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	count, err := store.Count(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("queued events = %d, want 0 after direct delivery", count)
+	}
+}
+
+func TestSendHookEventsOrQueueCancelsAndJoinsSpeculativeQueue(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("content-type", "application/json")
+		_, _ = writer.Write([]byte(`{"accepted":1,"duplicated":0,"rejected":0}`))
+	}))
+	defer server.Close()
+	client := uplink.NewClient(uplink.Config{
+		APIURL:            server.URL,
+		AllowInsecureHTTP: true,
+		HTTPClient:        &http.Client{Timeout: hookDeliveryTimeout},
+	})
+	hookCtx, stopHook := context.WithTimeout(context.Background(), hookCollectionTimeout)
+	defer stopHook()
+	queueOpenStopped := make(chan struct{})
+
+	err := sendHookEventsOrQueueWithOpener(
+		hookCtx,
+		daemonAdapterConfig{},
+		hookDeliveryTimeout,
+		client,
+		[]contracts.AgentEvent{{IdempotencyKey: "direct-delivery"}},
+		func(ctx context.Context, _ daemonAdapterConfig) (*queue.Store, error) {
+			<-ctx.Done()
+			close(queueOpenStopped)
+			return nil, ctx.Err()
+		},
+	)
+
+	if err != nil {
+		t.Fatalf("send hook events: %v", err)
+	}
+	select {
+	case <-queueOpenStopped:
+	default:
+		t.Fatal("speculative queue opener was not joined after cancellation")
+	}
+}
+
+func TestSendHookEventsOrQueueRejectsNilQueueAfterDeliveryFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	client := uplink.NewClient(uplink.Config{
+		APIURL:            server.URL,
+		AllowInsecureHTTP: true,
+		HTTPClient:        &http.Client{Timeout: hookDeliveryTimeout},
+	})
+	hookCtx, stopHook := context.WithTimeout(context.Background(), hookCollectionTimeout)
+	defer stopHook()
+
+	err := sendHookEventsOrQueueWithOpener(
+		hookCtx,
+		daemonAdapterConfig{},
+		hookDeliveryTimeout,
+		client,
+		[]contracts.AgentEvent{{IdempotencyKey: "failed-delivery"}},
+		func(context.Context, daemonAdapterConfig) (*queue.Store, error) {
+			return nil, nil
+		},
+	)
+
+	if err == nil || !strings.Contains(err.Error(), "returned nil store") {
+		t.Fatalf("send hook events error = %v, want nil store error", err)
+	}
+}
+
 func TestHookFallbackStopsWaitingWithinQueueBudget(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "queue.db")
 	firstStore, err := queue.Open(path, queue.Options{})
