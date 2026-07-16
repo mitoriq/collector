@@ -1562,7 +1562,22 @@ func defaultLaunchdPath() string {
 		home = "."
 	}
 
-	return filepath.Join(home, "Library", "LaunchAgents", "com.mitoriq.collector.plist")
+	return filepath.Join(home, "Library", "LaunchAgents", launchdServiceLabel+".plist")
+}
+
+func defaultLaunchdLifecycleLockPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = "."
+	}
+
+	return filepath.Join(
+		home,
+		"Library",
+		"Application Support",
+		launchdLifecycleLockDirectory,
+		launchdLifecycleLockFileName,
+	)
 }
 
 func installStatus(dryRun bool) string {
@@ -1574,11 +1589,7 @@ func installStatus(dryRun bool) string {
 }
 
 func writeLaunchdPlist(path string, body string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-
-	return os.WriteFile(path, []byte(body+"\n"), 0o644)
+	return writeLaunchdPlistWithOps(path, body, defaultLaunchdAtomicFileOps())
 }
 
 func allowInsecureForSavedConfig(apiURL string, explicit bool) bool {
