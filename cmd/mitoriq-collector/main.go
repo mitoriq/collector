@@ -355,13 +355,15 @@ func runEnroll(args []string, stdout io.Writer, stderr io.Writer) error {
 }
 
 func runClaudeHook(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
+	hookCtx, stopHook := context.WithTimeout(context.Background(), hookProcessingTimeout)
+	defer stopHook()
 	flags := flag.NewFlagSet("claude-hook", flag.ContinueOnError)
 	adapterValues := addAdapterFlags(flags)
 	flags.SetOutput(stderr)
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	config, err := adapterValues.config(context.Background())
+	config, err := adapterValues.config(hookCtx)
 	if err != nil {
 		return err
 	}
@@ -376,16 +378,18 @@ func runClaudeHook(args []string, stdin io.Reader, stdout io.Writer, stderr io.W
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), eventDeliveryTimeout)
+	deliveryTimeout := min(eventDeliveryTimeout, hookDeliveryTimeout)
+	ctx, cancel := context.WithTimeout(hookCtx, deliveryTimeout)
 	defer cancel()
-	client := uplink.NewClient(config.uplinkConfig(&http.Client{Timeout: eventDeliveryTimeout}))
-	eventQueue, err := openEventQueue(config)
+	client := uplink.NewClient(config.uplinkConfig(&http.Client{Timeout: deliveryTimeout}))
+	eventQueue, err := openEventQueueContext(hookCtx, config)
 	if err != nil {
 		return err
 	}
 	defer eventQueue.Close()
-	if err := deliverCollection(
+	if err := deliverCollectionWithQueueContext(
 		ctx,
+		hookCtx,
 		client,
 		eventQueue,
 		gateRepoAllowlist(collection.Events, config),
@@ -397,13 +401,15 @@ func runClaudeHook(args []string, stdin io.Reader, stdout io.Writer, stderr io.W
 }
 
 func runCodexHook(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
+	hookCtx, stopHook := context.WithTimeout(context.Background(), hookProcessingTimeout)
+	defer stopHook()
 	flags := flag.NewFlagSet("codex-hook", flag.ContinueOnError)
 	adapterValues := addAdapterFlags(flags)
 	flags.SetOutput(stderr)
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	config, err := adapterValues.config(context.Background())
+	config, err := adapterValues.config(hookCtx)
 	if err != nil {
 		return err
 	}
@@ -430,16 +436,18 @@ func runCodexHook(args []string, stdin io.Reader, stdout io.Writer, stderr io.Wr
 		collection.UsageMetrics = append(transcriptCollection.UsageMetrics, collection.UsageMetrics...)
 		collection.Events = omitTerminalEventsForWaitingUser(collection.Events, transcriptCollection.Events)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), eventDeliveryTimeout)
+	deliveryTimeout := min(eventDeliveryTimeout, hookDeliveryTimeout)
+	ctx, cancel := context.WithTimeout(hookCtx, deliveryTimeout)
 	defer cancel()
-	client := uplink.NewClient(config.uplinkConfig(&http.Client{Timeout: eventDeliveryTimeout}))
-	eventQueue, err := openEventQueue(config)
+	client := uplink.NewClient(config.uplinkConfig(&http.Client{Timeout: deliveryTimeout}))
+	eventQueue, err := openEventQueueContext(hookCtx, config)
 	if err != nil {
 		return err
 	}
 	defer eventQueue.Close()
-	if err := deliverCollection(
+	if err := deliverCollectionWithQueueContext(
 		ctx,
+		hookCtx,
 		client,
 		eventQueue,
 		gateRepoAllowlist(collection.Events, config),
@@ -1138,7 +1146,12 @@ func writeDoctorDenyStatus(configPath string, stdout io.Writer) error {
 	return nil
 }
 
-const queueDrainInterval = time.Minute
+const (
+	hookDeliveryTimeout   = 50 * time.Millisecond
+	hookProcessingTimeout = 350 * time.Millisecond
+	queueDrainInterval    = time.Minute
+	queueWriteTimeout     = 250 * time.Millisecond
+)
 
 var eventDeliveryTimeout = 2 * time.Second
 
@@ -1149,8 +1162,32 @@ func deliverCollection(
 	events []contracts.AgentEvent,
 	metrics []contracts.UsageMetric,
 ) error {
+	return deliverCollectionWithQueueContext(
+		ctx,
+		nil,
+		client,
+		eventQueue,
+		events,
+		metrics,
+	)
+}
+
+func deliverCollectionWithQueueContext(
+	ctx context.Context,
+	queueCtx context.Context,
+	client uplink.Client,
+	eventQueue *queue.Store,
+	events []contracts.AgentEvent,
+	metrics []contracts.UsageMetric,
+) error {
 	versionedEvents := withCollectorVersion(events, version.Current().Version)
-	if err := sendEventsOrQueue(ctx, client, eventQueue, versionedEvents); err != nil {
+	var err error
+	if queueCtx == nil {
+		err = sendEventsOrQueue(ctx, client, eventQueue, versionedEvents)
+	} else {
+		err = sendEventsOrQueueContext(ctx, queueCtx, client, eventQueue, versionedEvents)
+	}
+	if err != nil {
 		return err
 	}
 	if len(metrics) > 0 {
@@ -1184,6 +1221,19 @@ func sendEventsOrQueue(
 	eventQueue *queue.Store,
 	events []contracts.AgentEvent,
 ) error {
+	queueCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), queueWriteTimeout)
+	defer cancel()
+
+	return sendEventsOrQueueContext(ctx, queueCtx, client, eventQueue, events)
+}
+
+func sendEventsOrQueueContext(
+	ctx context.Context,
+	queueCtx context.Context,
+	client uplink.Client,
+	eventQueue *queue.Store,
+	events []contracts.AgentEvent,
+) error {
 	if len(events) == 0 {
 		return nil
 	}
@@ -1197,7 +1247,7 @@ func sendEventsOrQueue(
 	if eventQueue == nil {
 		return err
 	}
-	if queueErr := enqueueEvents(eventQueue, events); queueErr != nil {
+	if queueErr := enqueueEvents(queueCtx, eventQueue, events); queueErr != nil {
 		return errors.Join(err, queueErr)
 	}
 
@@ -1205,13 +1255,28 @@ func sendEventsOrQueue(
 }
 
 func openEventQueue(config daemonAdapterConfig) (*queue.Store, error) {
-	auditPath := (localaudit.Store{Path: config.AuditLogPath}).ResolvedPath()
-	return queue.Open(filepath.Join(filepath.Dir(auditPath), "collector-queue.db"), queue.Options{})
+	return openEventQueueContext(context.Background(), config)
 }
 
-func enqueueEvents(eventQueue *queue.Store, events []contracts.AgentEvent) error {
+func openEventQueueContext(
+	ctx context.Context,
+	config daemonAdapterConfig,
+) (*queue.Store, error) {
+	auditPath := (localaudit.Store{Path: config.AuditLogPath}).ResolvedPath()
+	return queue.OpenContext(
+		ctx,
+		filepath.Join(filepath.Dir(auditPath), "collector-queue.db"),
+		queue.Options{},
+	)
+}
+
+func enqueueEvents(
+	ctx context.Context,
+	eventQueue *queue.Store,
+	events []contracts.AgentEvent,
+) error {
 	for _, event := range events {
-		if _, err := eventQueue.Enqueue(context.Background(), event); err != nil {
+		if _, err := eventQueue.Enqueue(ctx, event); err != nil {
 			return fmt.Errorf("enqueue collector event: %w", err)
 		}
 	}

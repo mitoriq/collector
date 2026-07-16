@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -552,6 +554,177 @@ func TestClaudeAndCodexHooksQueueEventsWhenTheUplinkTimesOut(t *testing.T) {
 				t.Fatalf("queued events = %d, want 1", count)
 			}
 		})
+	}
+}
+
+func TestClaudeHookReservesTimeToQueueWithDefaultDeliveryTimeout(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+	args := hookFailureArgs()
+	for index, value := range args {
+		if value == "http://127.0.0.1:1" {
+			args[index] = server.URL
+		}
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	startedAt := time.Now()
+
+	if err := runClaudeHook(
+		args,
+		strings.NewReader(
+			`{"session_id":"claude-session-1","cwd":"/repo","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"pwd"}}`,
+		),
+		&stdout,
+		&stderr,
+	); err != nil {
+		t.Fatalf("run hook: %v", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed >= 500*time.Millisecond {
+		t.Fatalf("hook response exceeded queueing budget: %s", elapsed)
+	}
+	store, err := openEventQueue(daemonAdapterConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	count, err := store.Count(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("queued events = %d, want 1", count)
+	}
+}
+
+func TestHookFallbackStopsWaitingWithinQueueBudget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "queue.db")
+	firstStore, err := queue.Open(path, queue.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer firstStore.Close()
+	secondStore, err := queue.Open(path, queue.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondStore.Close()
+
+	lockDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockDB.Close()
+	transaction, err := lockDB.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transaction.Rollback()
+	if _, err := transaction.ExecContext(context.Background(), `INSERT INTO queue_events
+		(idempotency_key, payload, attempts, available_at, created_at)
+		VALUES (?, ?, 0, ?, ?)`, "held-key", "{}", time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	startedAt := time.Now()
+	err = sendEventsOrQueue(
+		ctx,
+		testClient("http://127.0.0.1:1"),
+		secondStore,
+		[]contracts.AgentEvent{{IdempotencyKey: "waiting-key"}},
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("enqueue error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed >= 500*time.Millisecond {
+		t.Fatalf("enqueue fallback exceeded hook budget: %s", elapsed)
+	}
+}
+
+func TestClaudeHookReturnsWithinBudgetWhenQueueWriterStaysLocked(t *testing.T) {
+	previousTimeout := eventDeliveryTimeout
+	eventDeliveryTimeout = 50 * time.Millisecond
+	t.Cleanup(func() {
+		eventDeliveryTimeout = previousTimeout
+	})
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	store, err := openEventQueue(daemonAdapterConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(home, ".local", "state", "mitoriq", "collector-queue.db")
+	lockDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockDB.Close()
+	transaction, err := lockDB.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transaction.Rollback()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := transaction.ExecContext(context.Background(), `INSERT INTO queue_events
+		(idempotency_key, payload, attempts, available_at, created_at)
+		VALUES (?, ?, 0, ?, ?)`, "held-key", "{}", now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	body := strings.NewReader(
+		`{"session_id":"claude-session-1","cwd":"/repo","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"pwd"}}`,
+	)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	startedAt := time.Now()
+	err = runClaudeHook(hookFailureArgs(), body, &stdout, &stderr)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("hook error = %v, want context deadline exceeded", err)
+	}
+	if !strings.Contains(err.Error(), "enqueue collector event") {
+		t.Fatalf("hook error = %v, want queue persistence failure", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed >= 500*time.Millisecond {
+		t.Fatalf("hook response exceeded queueing budget: %s", elapsed)
+	}
+	if err := transaction.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := runClaudeHook(
+		hookFailureArgs(),
+		strings.NewReader(
+			`{"session_id":"claude-session-1","cwd":"/repo","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"pwd"}}`,
+		),
+		&stdout,
+		&stderr,
+	); err != nil {
+		t.Fatalf("retry hook after writer release: %v", err)
+	}
+	store, err = openEventQueue(daemonAdapterConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	count, err := store.Count(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("queued events after retry = %d, want 1", count)
 	}
 }
 
