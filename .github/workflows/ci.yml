@@ -49,6 +49,9 @@ jobs:
       - name: Test installer
         run: sh scripts/install.test.sh
 
+      - name: Test release signing helper
+        run: sh scripts/sign-release-binary.test.sh
+
       - name: Build
         run: go build -o "$RUNNER_TEMP/mitoriq-collector" ./cmd/mitoriq-collector
 
