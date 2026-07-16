@@ -27,8 +27,8 @@ var (
 
 type archiveTarget struct {
 	version string
-	goos   string
-	goarch string
+	goos    string
+	goarch  string
 }
 
 func VerifyDirectory(distDir string, thirdPartyEntries []string) error {
