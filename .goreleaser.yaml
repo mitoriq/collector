@@ -1,0 +1,170 @@
+version: 2
+
+project_name: mitoriq-collector
+
+before:
+  hooks:
+    - go mod verify
+
+builds:
+  - id: mitoriq-collector-darwin
+    binary: mitoriq-collector
+    main: ./cmd/mitoriq-collector
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - >-
+        -s -w
+        -X github.com/mitoriq/collector/internal/version.version={{ .Version }}
+        -X github.com/mitoriq/collector/internal/version.commit={{ .Commit }}
+        -X github.com/mitoriq/collector/internal/version.date={{ .CommitDate }}
+        {{- with (index .Env "COLLECTOR_RELEASE_API_URL") }}
+        -X github.com/mitoriq/collector/internal/version.releaseAPIURL={{ . }}
+        {{- end }}
+        {{- with (index .Env "COLLECTOR_COSIGN_PUBLIC_KEY_B64") }}
+        -X github.com/mitoriq/collector/internal/version.releasePublicKeyBase64={{ . }}
+        {{- end }}
+        {{- with (index .Env "COLLECTOR_NEXT_COSIGN_PUBLIC_KEY_B64") }}
+        -X github.com/mitoriq/collector/internal/version.releaseNextPublicKeyBase64={{ . }}
+        {{- end }}
+        {{- with (index .Env "COLLECTOR_MACOS_TEAM_ID") }}
+        -X github.com/mitoriq/collector/internal/version.releaseMacOSTeamID={{ . }}
+        {{- end }}
+  - id: mitoriq-collector-linux
+    binary: mitoriq-collector
+    main: ./cmd/mitoriq-collector
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - >-
+        -s -w
+        -X github.com/mitoriq/collector/internal/version.version={{ .Version }}
+        -X github.com/mitoriq/collector/internal/version.commit={{ .Commit }}
+        -X github.com/mitoriq/collector/internal/version.date={{ .CommitDate }}
+        {{- with (index .Env "COLLECTOR_RELEASE_API_URL") }}
+        -X github.com/mitoriq/collector/internal/version.releaseAPIURL={{ . }}
+        {{- end }}
+        {{- with (index .Env "COLLECTOR_COSIGN_PUBLIC_KEY_B64") }}
+        -X github.com/mitoriq/collector/internal/version.releasePublicKeyBase64={{ . }}
+        {{- end }}
+        {{- with (index .Env "COLLECTOR_NEXT_COSIGN_PUBLIC_KEY_B64") }}
+        -X github.com/mitoriq/collector/internal/version.releaseNextPublicKeyBase64={{ . }}
+        {{- end }}
+        {{- with (index .Env "COLLECTOR_MACOS_TEAM_ID") }}
+        -X github.com/mitoriq/collector/internal/version.releaseMacOSTeamID={{ . }}
+        {{- end }}
+
+binary_signs:
+  - id: cosign-binaries
+    cmd: cosign
+    signature: "${artifact}.sig"
+    stdin: "{{ .Env.COSIGN_PASSWORD }}"
+    args:
+      - sign-blob
+      - "--key={{ .Env.COSIGN_KEY_PATH }}"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+      - --yes
+    artifacts: binary
+    ids:
+      - mitoriq-collector-linux
+
+notarize:
+  macos:
+    - enabled: "{{ .Env.MACOS_NOTARIZE_ENABLED }}"
+      ids:
+        - mitoriq-collector-darwin
+      sign:
+        certificate: "{{ .Env.MACOS_SIGN_P12 }}"
+        password: "{{ .Env.MACOS_SIGN_PASSWORD }}"
+      notarize:
+        issuer_id: "{{ .Env.MACOS_NOTARY_ISSUER_ID }}"
+        key_id: "{{ .Env.MACOS_NOTARY_KEY_ID }}"
+        key: "{{ .Env.MACOS_NOTARY_KEY }}"
+        wait: true
+        timeout: 20m
+
+archives:
+  - id: binary-archives
+    ids:
+      - mitoriq-collector-darwin
+      - mitoriq-collector-linux
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    formats:
+      - tar.gz
+    files:
+      - LICENSE
+      - NOTICE
+      - THIRD_PARTY_NOTICES.md
+      - THIRD_PARTY_LICENSES/**/*
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+signs:
+  - id: cosign-checksums
+    cmd: cosign
+    signature: "${artifact}.sig"
+    stdin: "{{ .Env.COSIGN_PASSWORD }}"
+    args:
+      - sign-blob
+      - "--key={{ .Env.COSIGN_KEY_PATH }}"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+      - --yes
+    artifacts: checksum
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+release:
+  prerelease: auto
+
+homebrew_casks:
+  - name: mitoriq-collector
+    ids:
+      - binary-archives
+    binaries:
+      - mitoriq-collector
+    repository:
+      owner: mitoriq
+      name: homebrew-tap
+      branch: "mitoriq-collector-{{ .Version }}"
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+      pull_request:
+        enabled: true
+        draft: false
+        base:
+          owner: mitoriq
+          name: homebrew-tap
+          branch: main
+    directory: Casks
+    homepage: https://mitoriq.com
+    description: Metadata-only local collector for Mitoriq
+    license: Apache-2.0
