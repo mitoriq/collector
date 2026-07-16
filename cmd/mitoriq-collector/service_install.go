@@ -11,10 +11,14 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
-const systemdServiceName = "mitoriq-collector.service"
+const (
+	launchdServiceLabel = "com.mitoriq.collector"
+	systemdServiceName  = "mitoriq-collector.service"
+)
 
 type commandRunner interface {
 	Run(name string, args ...string) error
@@ -46,7 +50,7 @@ func runInstallForOS(
 	stderr io.Writer,
 	goos string,
 	runner commandRunner,
-	username string,
+	userIdentity string,
 ) error {
 	flags := flag.NewFlagSet("install", flag.ContinueOnError)
 	binaryPath := flags.String("binary", "", "mitoriq-collector binary path")
@@ -88,24 +92,37 @@ func runInstallForOS(
 
 	switch goos {
 	case "darwin":
-		return installLaunchd(plan, *dryRun, stdout)
+		if !*dryRun && strings.TrimSpace(userIdentity) == "" {
+			currentUser, err := user.Current()
+			if err != nil {
+				return fmt.Errorf("resolve current user for launchd: %w", err)
+			}
+			userIdentity = currentUser.Uid
+		}
+		return installLaunchd(plan, *dryRun, stdout, runner, userIdentity)
 	case "linux":
-		if !*dryRun && strings.TrimSpace(username) == "" {
+		if !*dryRun && strings.TrimSpace(userIdentity) == "" {
 			currentUser, err := user.Current()
 			if err != nil {
 				return fmt.Errorf("resolve current user for systemd linger: %w", err)
 			}
-			username = currentUser.Username
+			userIdentity = currentUser.Username
 		}
-		return installSystemdUser(plan, *dryRun, stdout, runner, username)
+		return installSystemdUser(plan, *dryRun, stdout, runner, userIdentity)
 	default:
 		return fmt.Errorf("unsupported operating system for install: %s", goos)
 	}
 }
 
-func installLaunchd(plan installPlan, dryRun bool, stdout io.Writer) error {
+func installLaunchd(
+	plan installPlan,
+	dryRun bool,
+	stdout io.Writer,
+	runner commandRunner,
+	userID string,
+) error {
 	if !dryRun {
-		if err := writeLaunchdPlist(plan.LaunchdPath, plan.launchdPlist()); err != nil {
+		if err := activateLaunchdService(plan, runner, userID); err != nil {
 			return err
 		}
 	}
@@ -117,6 +134,83 @@ func installLaunchd(plan installPlan, dryRun bool, stdout io.Writer) error {
 	}
 
 	return writeHookSnippets(stdout, plan)
+}
+
+func activateLaunchdService(plan installPlan, runner commandRunner, userID string) error {
+	domain, err := launchdUserDomain(userID)
+	if err != nil {
+		return err
+	}
+	serviceTarget := domain + "/" + launchdServiceLabel
+	isLoaded, err := launchdServiceLoaded(runner, serviceTarget)
+	if err != nil {
+		return err
+	}
+	previousPlist, readErr := os.ReadFile(plan.LaunchdPath)
+	hadPreviousPlist := readErr == nil
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return fmt.Errorf("read existing launchd plist: %w", readErr)
+	}
+	if isLoaded && !hadPreviousPlist {
+		return fmt.Errorf("loaded launchd service is missing its owned plist: %s", plan.LaunchdPath)
+	}
+	if err := writeLaunchdPlist(plan.LaunchdPath, plan.launchdPlist()); err != nil {
+		return err
+	}
+	if isLoaded {
+		if err := runner.Run("launchctl", "bootout", serviceTarget); err != nil {
+			restoreErr := restoreLaunchdPlist(plan.LaunchdPath, previousPlist, hadPreviousPlist)
+			return errors.Join(fmt.Errorf("boot out existing launchd service: %w", err), restoreErr)
+		}
+	}
+	if err := runner.Run("launchctl", "bootstrap", domain, plan.LaunchdPath); err != nil {
+		restoreErr := restoreLaunchdPlist(plan.LaunchdPath, previousPlist, hadPreviousPlist)
+		var restartErr error
+		if isLoaded && restoreErr == nil {
+			if err := runner.Run("launchctl", "bootstrap", domain, plan.LaunchdPath); err != nil {
+				restartErr = fmt.Errorf("restart previous launchd service after rollback: %w", err)
+			}
+		}
+		return errors.Join(fmt.Errorf("bootstrap launchd service: %w", err), restoreErr, restartErr)
+	}
+
+	return nil
+}
+
+func launchdUserDomain(userID string) (string, error) {
+	uid, err := strconv.Atoi(strings.TrimSpace(userID))
+	if err != nil || uid < 0 {
+		return "", fmt.Errorf("current user ID is required to activate launchd service")
+	}
+
+	return fmt.Sprintf("gui/%d", uid), nil
+}
+
+func launchdServiceLoaded(runner commandRunner, serviceTarget string) (bool, error) {
+	err := runner.Run("launchctl", "print", serviceTarget)
+	if err == nil {
+		return true, nil
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "could not find service") {
+		return false, nil
+	}
+
+	return false, fmt.Errorf("inspect launchd service: %w", err)
+}
+
+func restoreLaunchdPlist(path string, previous []byte, existed bool) error {
+	if existed {
+		if err := os.WriteFile(path, previous, 0o644); err != nil {
+			return fmt.Errorf("restore previous launchd plist: %w", err)
+		}
+
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove failed launchd plist: %w", err)
+	}
+
+	return nil
 }
 
 func installSystemdUser(

@@ -123,7 +123,7 @@ Cursor usage counters are supported independently of session state. `mitoriq-col
 
 ## Service Installation
 
-- macOS keeps the existing launchd behavior and writes `~/Library/LaunchAgents/com.mitoriq.collector.plist`.
+- macOS writes `~/Library/LaunchAgents/com.mitoriq.collector.plist` and immediately bootstraps it in the current user's launchd domain. Re-running install reloads the owned service so an updated plist takes effect; if activation fails, the previous plist and loaded service are restored.
 - Linux writes `~/.config/systemd/user/mitoriq-collector.service` with `Restart=always`, reloads the user manager, enables linger for the current user, and runs `systemctl --user enable --now mitoriq-collector.service`. This allows a stable-channel update to exit the old daemon and have systemd start the verified replacement.
 - Linux uninstall runs `systemctl --user disable --now mitoriq-collector.service`, removes only the owned unit path, and reloads the user manager.
 - `--dry-run` prints the platform file and hook snippets without writing files or invoking service-manager commands. Other operating systems return an explicit unsupported error.

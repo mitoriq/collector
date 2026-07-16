@@ -137,8 +137,11 @@ type recordedCommand struct {
 }
 
 type recordingCommandRunner struct {
-	calls      []recordedCommand
-	failEnable bool
+	calls                    []recordedCommand
+	failEnable               bool
+	failLaunchdInspect       bool
+	launchdNotLoaded         bool
+	failNextLaunchdBootstrap bool
 }
 
 func (runner *recordingCommandRunner) Run(name string, args ...string) error {
@@ -146,8 +149,167 @@ func (runner *recordingCommandRunner) Run(name string, args ...string) error {
 	if runner.failEnable && name == "systemctl" && reflect.DeepEqual(args, []string{"--user", "enable", "--now", systemdServiceName}) {
 		return errors.New("enable failed")
 	}
+	if runner.failLaunchdInspect && name == "launchctl" && len(args) > 0 && args[0] == "print" {
+		return errors.New("launchctl: operation not permitted")
+	}
+	if runner.launchdNotLoaded && name == "launchctl" && len(args) > 0 && args[0] == "print" {
+		return errors.New("launchctl: Could not find service in domain")
+	}
+	if runner.failNextLaunchdBootstrap && name == "launchctl" && len(args) > 0 && args[0] == "bootstrap" {
+		runner.failNextLaunchdBootstrap = false
+		return errors.New("bootstrap failed")
+	}
 
 	return nil
+}
+
+func TestRunInstallForDarwinWritesLaunchdPlistAndBootstrapsNewService(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	runner := &recordingCommandRunner{launchdNotLoaded: true}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	err := runInstallForOS([]string{
+		"--binary", "/opt/homebrew/bin/mitoriq-collector",
+		"--tools", "claude,codex",
+	}, &stdout, &stderr, "darwin", runner, "501")
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	launchdPath := filepath.Join(home, "Library", "LaunchAgents", "com.mitoriq.collector.plist")
+	if _, err := os.Stat(launchdPath); err != nil {
+		t.Fatal(err)
+	}
+	expectedCalls := []recordedCommand{
+		{name: "launchctl", args: []string{"print", "gui/501/com.mitoriq.collector"}},
+		{name: "launchctl", args: []string{"bootstrap", "gui/501", launchdPath}},
+	}
+	if !reflect.DeepEqual(runner.calls, expectedCalls) {
+		t.Fatalf("calls = %#v, want %#v", runner.calls, expectedCalls)
+	}
+	if !strings.Contains(stdout.String(), "collector_install_status=written launchd_plist="+launchdPath) {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestRunInstallForDarwinReplacesLoadedServiceBeforeBootstrap(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	launchdPath := filepath.Join(home, "Library", "LaunchAgents", "com.mitoriq.collector.plist")
+	if err := os.MkdirAll(filepath.Dir(launchdPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launchdPath, []byte("old plist\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingCommandRunner{}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	err := runInstallForOS([]string{
+		"--binary", "/opt/homebrew/bin/mitoriq-collector",
+		"--tools", "claude",
+	}, &stdout, &stderr, "darwin", runner, "501")
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedCalls := []recordedCommand{
+		{name: "launchctl", args: []string{"print", "gui/501/com.mitoriq.collector"}},
+		{name: "launchctl", args: []string{"bootout", "gui/501/com.mitoriq.collector"}},
+		{name: "launchctl", args: []string{"bootstrap", "gui/501", launchdPath}},
+	}
+	if !reflect.DeepEqual(runner.calls, expectedCalls) {
+		t.Fatalf("calls = %#v, want %#v", runner.calls, expectedCalls)
+	}
+	body, err := os.ReadFile(launchdPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "old plist") || !strings.Contains(string(body), "/opt/homebrew/bin/mitoriq-collector") {
+		t.Fatalf("plist = %q", body)
+	}
+}
+
+func TestRunInstallForDarwinRestoresPreviousServiceWhenBootstrapFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	launchdPath := filepath.Join(home, "Library", "LaunchAgents", "com.mitoriq.collector.plist")
+	if err := os.MkdirAll(filepath.Dir(launchdPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	previousPlist := []byte("old plist\n")
+	if err := os.WriteFile(launchdPath, previousPlist, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingCommandRunner{failNextLaunchdBootstrap: true}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	err := runInstallForOS([]string{
+		"--binary", "/opt/homebrew/bin/mitoriq-collector",
+		"--tools", "claude",
+	}, &stdout, &stderr, "darwin", runner, "501")
+
+	if err == nil || !strings.Contains(err.Error(), "bootstrap launchd service") {
+		t.Fatalf("err = %v", err)
+	}
+	body, readErr := os.ReadFile(launchdPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !reflect.DeepEqual(body, previousPlist) {
+		t.Fatalf("plist = %q, want %q", body, previousPlist)
+	}
+	expectedCalls := []recordedCommand{
+		{name: "launchctl", args: []string{"print", "gui/501/com.mitoriq.collector"}},
+		{name: "launchctl", args: []string{"bootout", "gui/501/com.mitoriq.collector"}},
+		{name: "launchctl", args: []string{"bootstrap", "gui/501", launchdPath}},
+		{name: "launchctl", args: []string{"bootstrap", "gui/501", launchdPath}},
+	}
+	if !reflect.DeepEqual(runner.calls, expectedCalls) {
+		t.Fatalf("calls = %#v, want %#v", runner.calls, expectedCalls)
+	}
+}
+
+func TestRunInstallForDarwinDoesNotMutatePlistWhenServiceInspectionFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	launchdPath := filepath.Join(home, "Library", "LaunchAgents", "com.mitoriq.collector.plist")
+	if err := os.MkdirAll(filepath.Dir(launchdPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	previousPlist := []byte("old plist\n")
+	if err := os.WriteFile(launchdPath, previousPlist, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingCommandRunner{failLaunchdInspect: true}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	err := runInstallForOS([]string{
+		"--binary", "/opt/homebrew/bin/mitoriq-collector",
+		"--tools", "claude",
+	}, &stdout, &stderr, "darwin", runner, "501")
+
+	if err == nil || !strings.Contains(err.Error(), "inspect launchd service") {
+		t.Fatalf("err = %v", err)
+	}
+	body, readErr := os.ReadFile(launchdPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !reflect.DeepEqual(body, previousPlist) {
+		t.Fatalf("plist = %q, want %q", body, previousPlist)
+	}
+	expectedCalls := []recordedCommand{
+		{name: "launchctl", args: []string{"print", "gui/501/com.mitoriq.collector"}},
+	}
+	if !reflect.DeepEqual(runner.calls, expectedCalls) {
+		t.Fatalf("calls = %#v, want %#v", runner.calls, expectedCalls)
+	}
 }
 
 func TestRunInstallForLinuxWritesSystemdUserUnitAndEnablesService(t *testing.T) {

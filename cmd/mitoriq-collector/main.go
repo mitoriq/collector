@@ -1425,7 +1425,7 @@ func defaultLaunchdPath() string {
 		home = "."
 	}
 
-	return filepath.Join(home, "Library", "LaunchAgents", "com.mitoriq.collector.plist")
+	return filepath.Join(home, "Library", "LaunchAgents", launchdServiceLabel+".plist")
 }
 
 func installStatus(dryRun bool) string {
