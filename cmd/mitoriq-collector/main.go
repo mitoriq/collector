@@ -1149,7 +1149,8 @@ func deliverCollection(
 	events []contracts.AgentEvent,
 	metrics []contracts.UsageMetric,
 ) error {
-	if err := sendEventsOrQueue(ctx, client, eventQueue, events); err != nil {
+	versionedEvents := withCollectorVersion(events, version.Current().Version)
+	if err := sendEventsOrQueue(ctx, client, eventQueue, versionedEvents); err != nil {
 		return err
 	}
 	if len(metrics) > 0 {
@@ -1163,6 +1164,18 @@ func deliverCollection(
 	}
 
 	return nil
+}
+
+func withCollectorVersion(events []contracts.AgentEvent, collectorVersion string) []contracts.AgentEvent {
+	versionedEvents := make([]contracts.AgentEvent, len(events))
+	for index, event := range events {
+		if event.CollectorVersion == "" {
+			event.CollectorVersion = collectorVersion
+		}
+		versionedEvents[index] = event
+	}
+
+	return versionedEvents
 }
 
 func sendEventsOrQueue(

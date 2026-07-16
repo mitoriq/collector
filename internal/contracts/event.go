@@ -25,6 +25,7 @@ type AgentEvent struct {
 	SessionID              string         `json:"sessionId"`
 	ProjectID              *string        `json:"projectId"`
 	Source                 string         `json:"source"`
+	CollectorVersion       string         `json:"collectorVersion,omitempty"`
 	OccurredAt             string         `json:"occurredAt"`
 	IdempotencyKey         string         `json:"idempotencyKey"`
 	PrivacyLevel           string         `json:"privacyLevel"`
