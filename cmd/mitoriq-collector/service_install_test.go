@@ -139,6 +139,7 @@ type recordedCommand struct {
 type recordingCommandRunner struct {
 	calls                    []recordedCommand
 	failEnable               bool
+	failLaunchdBootout       bool
 	failLaunchdInspect       bool
 	launchdNotLoaded         bool
 	failNextLaunchdBootstrap bool
@@ -151,6 +152,9 @@ func (runner *recordingCommandRunner) Run(name string, args ...string) error {
 	}
 	if runner.failLaunchdInspect && name == "launchctl" && len(args) > 0 && args[0] == "print" {
 		return errors.New("launchctl: operation not permitted")
+	}
+	if runner.failLaunchdBootout && name == "launchctl" && len(args) > 0 && args[0] == "bootout" {
+		return errors.New("bootout failed")
 	}
 	if runner.launchdNotLoaded && name == "launchctl" && len(args) > 0 && args[0] == "print" {
 		return errors.New("launchctl: Could not find service in domain")
@@ -240,7 +244,7 @@ func TestRunInstallForDarwinRestoresPreviousServiceWhenBootstrapFails(t *testing
 	if err := os.MkdirAll(filepath.Dir(launchdPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	previousPlist := []byte("old plist\n")
+	previousPlist := []byte("old plist without trailing newline")
 	if err := os.WriteFile(launchdPath, previousPlist, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -267,6 +271,76 @@ func TestRunInstallForDarwinRestoresPreviousServiceWhenBootstrapFails(t *testing
 		{name: "launchctl", args: []string{"print", "gui/501/com.mitoriq.collector"}},
 		{name: "launchctl", args: []string{"bootout", "gui/501/com.mitoriq.collector"}},
 		{name: "launchctl", args: []string{"bootstrap", "gui/501", launchdPath}},
+		{name: "launchctl", args: []string{"bootstrap", "gui/501", launchdPath}},
+	}
+	if !reflect.DeepEqual(runner.calls, expectedCalls) {
+		t.Fatalf("calls = %#v, want %#v", runner.calls, expectedCalls)
+	}
+}
+
+func TestRunInstallForDarwinRestoresPreviousPlistWhenBootoutFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	launchdPath := filepath.Join(home, "Library", "LaunchAgents", "com.mitoriq.collector.plist")
+	if err := os.MkdirAll(filepath.Dir(launchdPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	previousPlist := []byte("old plist without trailing newline")
+	if err := os.WriteFile(launchdPath, previousPlist, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingCommandRunner{failLaunchdBootout: true}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	err := runInstallForOS([]string{
+		"--binary", "/opt/homebrew/bin/mitoriq-collector",
+		"--tools", "claude",
+	}, &stdout, &stderr, "darwin", runner, "501")
+
+	if err == nil || !strings.Contains(err.Error(), "boot out existing launchd service") {
+		t.Fatalf("err = %v", err)
+	}
+	body, readErr := os.ReadFile(launchdPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !reflect.DeepEqual(body, previousPlist) {
+		t.Fatalf("plist = %q, want %q", body, previousPlist)
+	}
+	expectedCalls := []recordedCommand{
+		{name: "launchctl", args: []string{"print", "gui/501/com.mitoriq.collector"}},
+		{name: "launchctl", args: []string{"bootout", "gui/501/com.mitoriq.collector"}},
+	}
+	if !reflect.DeepEqual(runner.calls, expectedCalls) {
+		t.Fatalf("calls = %#v, want %#v", runner.calls, expectedCalls)
+	}
+}
+
+func TestRunInstallForDarwinRemovesNewPlistWhenInitialBootstrapFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	runner := &recordingCommandRunner{
+		failNextLaunchdBootstrap: true,
+		launchdNotLoaded:         true,
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	err := runInstallForOS([]string{
+		"--binary", "/opt/homebrew/bin/mitoriq-collector",
+		"--tools", "claude",
+	}, &stdout, &stderr, "darwin", runner, "501")
+
+	if err == nil || !strings.Contains(err.Error(), "bootstrap launchd service") {
+		t.Fatalf("err = %v", err)
+	}
+	launchdPath := filepath.Join(home, "Library", "LaunchAgents", "com.mitoriq.collector.plist")
+	if _, statErr := os.Stat(launchdPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed new plist should be removed: %v", statErr)
+	}
+	expectedCalls := []recordedCommand{
+		{name: "launchctl", args: []string{"print", "gui/501/com.mitoriq.collector"}},
 		{name: "launchctl", args: []string{"bootstrap", "gui/501", launchdPath}},
 	}
 	if !reflect.DeepEqual(runner.calls, expectedCalls) {
@@ -309,6 +383,68 @@ func TestRunInstallForDarwinDoesNotMutatePlistWhenServiceInspectionFails(t *test
 	}
 	if !reflect.DeepEqual(runner.calls, expectedCalls) {
 		t.Fatalf("calls = %#v, want %#v", runner.calls, expectedCalls)
+	}
+}
+
+func TestWriteLaunchdPlistPreservesExistingFileWhenAtomicReplaceFails(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(launchdAtomicFileOps) launchdAtomicFileOps
+	}{
+		{
+			name: "write",
+			configure: func(ops launchdAtomicFileOps) launchdAtomicFileOps {
+				ops.write = func(*os.File, []byte) error {
+					return errors.New("write failed")
+				}
+
+				return ops
+			},
+		},
+		{
+			name: "rename",
+			configure: func(ops launchdAtomicFileOps) launchdAtomicFileOps {
+				ops.rename = func(string, string) error {
+					return errors.New("rename failed")
+				}
+
+				return ops
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			launchdPath := filepath.Join(directory, "com.mitoriq.collector.plist")
+			previousPlist := []byte("old plist\n")
+			if err := os.WriteFile(launchdPath, previousPlist, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			err := writeLaunchdPlistWithOps(
+				launchdPath,
+				"new plist",
+				test.configure(defaultLaunchdAtomicFileOps()),
+			)
+			if err == nil {
+				t.Fatal("expected atomic replace failure")
+			}
+			body, readErr := os.ReadFile(launchdPath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if !reflect.DeepEqual(body, previousPlist) {
+				t.Fatalf("plist = %q, want %q", body, previousPlist)
+			}
+			entries, readDirErr := os.ReadDir(directory)
+			if readDirErr != nil {
+				t.Fatal(readDirErr)
+			}
+			if len(entries) != 1 || entries[0].Name() != filepath.Base(launchdPath) {
+				t.Fatalf("unexpected files after failed replace: %#v", entries)
+			}
+		})
 	}
 }
 
@@ -398,7 +534,7 @@ func TestRunUninstallForLinuxDisablesServiceAndRemovesOwnedUnit(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	err := runUninstallForOS(nil, &stdout, &stderr, "linux", runner)
+	err := runUninstallForOS(nil, &stdout, &stderr, "linux", runner, "")
 
 	if err != nil {
 		t.Fatal(err)
@@ -446,6 +582,121 @@ func TestRunInstallForLinuxRollsBackUnitWhenEnableFails(t *testing.T) {
 	}
 }
 
+func TestRunUninstallForDarwinBootsOutLoadedServiceBeforeRemovingPlist(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	launchdPath := filepath.Join(home, "Library", "LaunchAgents", "com.mitoriq.collector.plist")
+	if err := os.MkdirAll(filepath.Dir(launchdPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launchdPath, []byte("owned plist\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingCommandRunner{}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	err := runUninstallForOS(nil, &stdout, &stderr, "darwin", runner, "501")
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, statErr := os.Stat(launchdPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("plist should be removed: %v", statErr)
+	}
+	expectedCalls := []recordedCommand{
+		{name: "launchctl", args: []string{"print", "gui/501/com.mitoriq.collector"}},
+		{name: "launchctl", args: []string{"bootout", "gui/501/com.mitoriq.collector"}},
+	}
+	if !reflect.DeepEqual(runner.calls, expectedCalls) {
+		t.Fatalf("calls = %#v, want %#v", runner.calls, expectedCalls)
+	}
+}
+
+func TestRunUninstallForDarwinRemovesPlistWhenServiceIsNotLoaded(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	launchdPath := filepath.Join(home, "Library", "LaunchAgents", "com.mitoriq.collector.plist")
+	if err := os.MkdirAll(filepath.Dir(launchdPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launchdPath, []byte("owned plist\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingCommandRunner{launchdNotLoaded: true}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	err := runUninstallForOS(nil, &stdout, &stderr, "darwin", runner, "501")
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, statErr := os.Stat(launchdPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("plist should be removed: %v", statErr)
+	}
+	expectedCalls := []recordedCommand{
+		{name: "launchctl", args: []string{"print", "gui/501/com.mitoriq.collector"}},
+	}
+	if !reflect.DeepEqual(runner.calls, expectedCalls) {
+		t.Fatalf("calls = %#v, want %#v", runner.calls, expectedCalls)
+	}
+}
+
+func TestRunUninstallForDarwinLeavesPlistWhenInspectionOrBootoutFails(t *testing.T) {
+	tests := []struct {
+		name   string
+		runner *recordingCommandRunner
+	}{
+		{
+			name:   "inspect",
+			runner: &recordingCommandRunner{failLaunchdInspect: true},
+		},
+		{
+			name:   "bootout",
+			runner: &recordingCommandRunner{failLaunchdBootout: true},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			launchdPath := filepath.Join(
+				home,
+				"Library",
+				"LaunchAgents",
+				"com.mitoriq.collector.plist",
+			)
+			if err := os.MkdirAll(filepath.Dir(launchdPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			previousPlist := []byte("owned plist\n")
+			if err := os.WriteFile(launchdPath, previousPlist, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			err := runUninstallForOS(nil, &stdout, &stderr, "darwin", test.runner, "501")
+
+			if err == nil {
+				t.Fatal("expected uninstall failure")
+			}
+			body, readErr := os.ReadFile(launchdPath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if !reflect.DeepEqual(body, previousPlist) {
+				t.Fatalf("plist = %q, want %q", body, previousPlist)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q", stdout.String())
+			}
+		})
+	}
+}
+
 func TestRunInstallAndUninstallRejectUnsupportedOS(t *testing.T) {
 	runner := &recordingCommandRunner{}
 	var stdout bytes.Buffer
@@ -463,7 +714,7 @@ func TestRunInstallAndUninstallRejectUnsupportedOS(t *testing.T) {
 	if settingsErr == nil || !strings.Contains(settingsErr.Error(), "unsupported operating system") {
 		t.Fatalf("print settings error = %v", settingsErr)
 	}
-	uninstallErr := runUninstallForOS(nil, &stdout, &stderr, "windows", runner)
+	uninstallErr := runUninstallForOS(nil, &stdout, &stderr, "windows", runner, "")
 	if uninstallErr == nil || !strings.Contains(uninstallErr.Error(), "unsupported operating system") {
 		t.Fatalf("uninstall error = %v", uninstallErr)
 	}

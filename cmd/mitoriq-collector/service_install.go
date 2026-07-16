@@ -40,6 +40,32 @@ func (execCommandRunner) Run(name string, args ...string) error {
 	return fmt.Errorf("%s: %w: %s", name, err, message)
 }
 
+type launchdAtomicFileOps struct {
+	createTemp func(dir string, pattern string) (*os.File, error)
+	remove     func(name string) error
+	rename     func(oldPath string, newPath string) error
+	write      func(file *os.File, body []byte) error
+}
+
+func defaultLaunchdAtomicFileOps() launchdAtomicFileOps {
+	return launchdAtomicFileOps{
+		createTemp: os.CreateTemp,
+		remove:     os.Remove,
+		rename:     os.Rename,
+		write: func(file *os.File, body []byte) error {
+			written, err := file.Write(body)
+			if err != nil {
+				return err
+			}
+			if written != len(body) {
+				return io.ErrShortWrite
+			}
+
+			return nil
+		},
+	}
+}
+
 func runInstall(args []string, stdout io.Writer, stderr io.Writer) error {
 	return runInstallForOS(args, stdout, stderr, runtime.GOOS, execCommandRunner{}, "")
 }
@@ -200,7 +226,11 @@ func launchdServiceLoaded(runner commandRunner, serviceTarget string) (bool, err
 
 func restoreLaunchdPlist(path string, previous []byte, existed bool) error {
 	if existed {
-		if err := os.WriteFile(path, previous, 0o644); err != nil {
+		if err := writeLaunchdPlistBytesWithOps(
+			path,
+			previous,
+			defaultLaunchdAtomicFileOps(),
+		); err != nil {
 			return fmt.Errorf("restore previous launchd plist: %w", err)
 		}
 
@@ -211,6 +241,66 @@ func restoreLaunchdPlist(path string, previous []byte, existed bool) error {
 	}
 
 	return nil
+}
+
+func writeLaunchdPlistWithOps(
+	filePath string,
+	body string,
+	ops launchdAtomicFileOps,
+) error {
+	return writeLaunchdPlistBytesWithOps(filePath, []byte(body+"\n"), ops)
+}
+
+func writeLaunchdPlistBytesWithOps(
+	filePath string,
+	body []byte,
+	ops launchdAtomicFileOps,
+) error {
+	directory := filepath.Dir(filePath)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return err
+	}
+	temp, err := ops.createTemp(directory, "."+filepath.Base(filePath)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	shouldRemoveTemp := true
+	defer func() {
+		_ = temp.Close()
+		if shouldRemoveTemp {
+			_ = ops.remove(tempPath)
+		}
+	}()
+
+	if err := ops.write(temp, body); err != nil {
+		return err
+	}
+	if err := temp.Chmod(0o644); err != nil {
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	if err := ops.rename(tempPath, filePath); err != nil {
+		return err
+	}
+	shouldRemoveTemp = false
+	syncLaunchdDirectory(directory)
+
+	return nil
+}
+
+func syncLaunchdDirectory(directory string) {
+	handle, err := os.Open(directory)
+	if err != nil {
+		return
+	}
+	defer handle.Close()
+	_ = handle.Sync()
 }
 
 func installSystemdUser(
@@ -273,7 +363,7 @@ func rollbackSystemdInstall(unitPath string, runner commandRunner, disable bool)
 }
 
 func runUninstall(args []string, stdout io.Writer, stderr io.Writer) error {
-	return runUninstallForOS(args, stdout, stderr, runtime.GOOS, execCommandRunner{})
+	return runUninstallForOS(args, stdout, stderr, runtime.GOOS, execCommandRunner{}, "")
 }
 
 func runUninstallForOS(
@@ -282,6 +372,7 @@ func runUninstallForOS(
 	stderr io.Writer,
 	goos string,
 	runner commandRunner,
+	userIdentity string,
 ) error {
 	flags := flag.NewFlagSet("uninstall", flag.ContinueOnError)
 	dryRun := flags.Bool("dry-run", false, "print planned removals without writing")
@@ -291,7 +382,14 @@ func runUninstallForOS(
 	}
 	switch goos {
 	case "darwin":
-		return uninstallLaunchd(*dryRun, stdout)
+		if !*dryRun && strings.TrimSpace(userIdentity) == "" {
+			currentUser, err := user.Current()
+			if err != nil {
+				return fmt.Errorf("resolve current user for launchd: %w", err)
+			}
+			userIdentity = currentUser.Uid
+		}
+		return uninstallLaunchd(*dryRun, stdout, runner, userIdentity)
 	case "linux":
 		return uninstallSystemdUser(*dryRun, stdout, runner)
 	default:
@@ -299,11 +397,30 @@ func runUninstallForOS(
 	}
 }
 
-func uninstallLaunchd(dryRun bool, stdout io.Writer) error {
+func uninstallLaunchd(
+	dryRun bool,
+	stdout io.Writer,
+	runner commandRunner,
+	userID string,
+) error {
 	launchdPath := defaultLaunchdPath()
 	if !dryRun {
-		if err := os.Remove(launchdPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		domain, err := launchdUserDomain(userID)
+		if err != nil {
 			return err
+		}
+		serviceTarget := domain + "/" + launchdServiceLabel
+		isLoaded, err := launchdServiceLoaded(runner, serviceTarget)
+		if err != nil {
+			return err
+		}
+		if isLoaded {
+			if err := runner.Run("launchctl", "bootout", serviceTarget); err != nil {
+				return fmt.Errorf("boot out launchd service: %w", err)
+			}
+		}
+		if err := os.Remove(launchdPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove launchd plist: %w", err)
 		}
 	}
 	_, err := fmt.Fprintf(stdout, "collector_uninstall_status=%s launchd_plist=%s\n", installStatus(dryRun), launchdPath)

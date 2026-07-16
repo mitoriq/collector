@@ -1830,7 +1830,14 @@ func TestRunUninstallDryRunPrintsOwnedLaunchdPath(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	err := runUninstallForOS([]string{"--dry-run"}, &stdout, &stderr, "darwin", &recordingCommandRunner{})
+	err := runUninstallForOS(
+		[]string{"--dry-run"},
+		&stdout,
+		&stderr,
+		"darwin",
+		&recordingCommandRunner{},
+		"",
+	)
 
 	if err != nil {
 		t.Fatalf("error = %v, stderr = %s", err, stderr.String())

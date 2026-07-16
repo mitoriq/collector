@@ -117,13 +117,14 @@ printf 'hook_settings_dir=%s\n' "$HOOKS_DIR"
 
 For Codex, open `/hooks` after editing the file and review/trust the generated command hook. For all tools, keep any existing matcher groups and append the Mitoriq groups for the same event instead of replacing them.
 
-`mitoriq-collector uninstall` removes only the collector-owned launchd plist or systemd unit. Because install never edits tool configuration, remove the Mitoriq command groups from the corresponding hook file manually when disconnecting the collector.
+`mitoriq-collector uninstall` stops the collector-owned launchd or systemd service before removing its plist or unit. Because install never edits tool configuration, remove the Mitoriq command groups from the corresponding hook file manually when disconnecting the collector.
 
 Cursor usage counters are supported independently of session state. `mitoriq-collector install --tools cursor --dry-run` prints a `cursor-hook --cursor-hooks-beta` command for opt-in lifecycle collection. Cursor lifecycle state is best-effort: running activity and explicit session end can be inferred, but permission and user-input waiting are not currently reliable signals.
 
 ## Service Installation
 
 - macOS writes `~/Library/LaunchAgents/com.mitoriq.collector.plist` and immediately bootstraps it in the current user's launchd domain. Re-running install reloads the owned service so an updated plist takes effect; if activation fails, the previous plist and loaded service are restored.
+- macOS uninstall inspects the current user's launchd domain, boots out the loaded collector service, and only then removes the owned plist. Inspection or bootout failure leaves the plist in place and returns an error.
 - Linux writes `~/.config/systemd/user/mitoriq-collector.service` with `Restart=always`, reloads the user manager, enables linger for the current user, and runs `systemctl --user enable --now mitoriq-collector.service`. This allows a stable-channel update to exit the old daemon and have systemd start the verified replacement.
 - Linux uninstall runs `systemctl --user disable --now mitoriq-collector.service`, removes only the owned unit path, and reloads the user manager.
 - `--dry-run` prints the platform file and hook snippets without writing files or invoking service-manager commands. Other operating systems return an explicit unsupported error.
