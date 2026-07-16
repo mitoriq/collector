@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/mitoriq/collector/internal/contracts"
@@ -22,11 +23,14 @@ type KeyGenerator func() (string, error)
 const (
 	busyRetryInterval = 10 * time.Millisecond
 	busyRetryTimeout  = 5 * time.Second
+	sqliteBusyTimeout = 25 * time.Millisecond
 )
 
 type Options struct {
 	KeyGenerator KeyGenerator
 	Now          func() time.Time
+	// SkipJournalModeConfiguration avoids a costly journal transition for latency-bounded hook fallback opens.
+	SkipJournalModeConfiguration bool
 }
 
 type Store struct {
@@ -47,6 +51,14 @@ type Record struct {
 }
 
 func Open(path string, options Options) (*Store, error) {
+	return OpenContext(context.Background(), path, options)
+}
+
+func OpenContext(
+	ctx context.Context,
+	path string,
+	options Options,
+) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
@@ -80,12 +92,49 @@ func Open(path string, options Options) (*Store, error) {
 			return time.Now().UTC()
 		}
 	}
-	if err := store.migrate(context.Background()); err != nil {
+	if err := store.configure(ctx, options.SkipJournalModeConfiguration); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := store.migrate(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 
 	return store, nil
+}
+
+func (store *Store) configure(
+	ctx context.Context,
+	skipJournalModeConfiguration bool,
+) error {
+	if _, err := store.db.ExecContext(
+		ctx,
+		fmt.Sprintf(`PRAGMA busy_timeout = %d`, sqliteBusyTimeout/time.Millisecond),
+	); err != nil {
+		return fmt.Errorf("configure queue busy timeout: %w", err)
+	}
+	if skipJournalModeConfiguration {
+		return nil
+	}
+
+	return store.configureJournalMode(ctx)
+}
+
+func (store *Store) configureJournalMode(ctx context.Context) error {
+	var journalMode string
+	err := store.db.QueryRowContext(ctx, `PRAGMA journal_mode = WAL`).Scan(&journalMode)
+	if isSQLiteBusy(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("configure queue journal mode: %w", err)
+	}
+	if !strings.EqualFold(journalMode, "wal") {
+		return fmt.Errorf("configure queue journal mode: got %q, want wal", journalMode)
+	}
+
+	return nil
 }
 
 func (store *Store) Close() error {
@@ -258,11 +307,18 @@ func waitForBusyRetry(
 }
 
 func isSQLiteBusy(err error) bool {
+	if err == nil {
+		return false
+	}
 	var sqliteErr interface {
 		error
 		Code() int
 	}
-	return errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == sqlite3.SQLITE_BUSY
+	if errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == sqlite3.SQLITE_BUSY {
+		return true
+	}
+
+	return strings.Contains(err.Error(), "(SQLITE_BUSY")
 }
 
 func randomKey() (string, error) {

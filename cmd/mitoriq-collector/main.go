@@ -376,18 +376,10 @@ func runClaudeHook(args []string, stdin io.Reader, stdout io.Writer, stderr io.W
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), eventDeliveryTimeout)
-	defer cancel()
-	client := uplink.NewClient(config.uplinkConfig(&http.Client{Timeout: eventDeliveryTimeout}))
-	eventQueue, err := openEventQueue(config)
-	if err != nil {
-		return err
-	}
-	defer eventQueue.Close()
-	if err := deliverCollection(
-		ctx,
-		client,
-		eventQueue,
+	deliveryTimeout := min(eventDeliveryTimeout, hookDeliveryTimeout)
+	if err := deliverHookCollection(
+		config,
+		deliveryTimeout,
 		gateRepoAllowlist(collection.Events, config),
 		collection.UsageMetrics,
 	); err != nil {
@@ -430,18 +422,10 @@ func runCodexHook(args []string, stdin io.Reader, stdout io.Writer, stderr io.Wr
 		collection.UsageMetrics = append(transcriptCollection.UsageMetrics, collection.UsageMetrics...)
 		collection.Events = omitTerminalEventsForWaitingUser(collection.Events, transcriptCollection.Events)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), eventDeliveryTimeout)
-	defer cancel()
-	client := uplink.NewClient(config.uplinkConfig(&http.Client{Timeout: eventDeliveryTimeout}))
-	eventQueue, err := openEventQueue(config)
-	if err != nil {
-		return err
-	}
-	defer eventQueue.Close()
-	if err := deliverCollection(
-		ctx,
-		client,
-		eventQueue,
+	deliveryTimeout := min(eventDeliveryTimeout, hookDeliveryTimeout)
+	if err := deliverHookCollection(
+		config,
+		deliveryTimeout,
 		gateRepoAllowlist(collection.Events, config),
 		collection.UsageMetrics,
 	); err != nil {
@@ -539,18 +523,10 @@ func collectAndDeliverCursorHook(
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	client := uplink.NewClient(config.uplinkConfig(&http.Client{Timeout: timeout}))
-	eventQueue, err := openEventQueue(config)
-	if err != nil {
-		return err
-	}
-	defer eventQueue.Close()
-	if err := deliverCollection(
-		ctx,
-		client,
-		eventQueue,
+	deliveryTimeout := min(timeout, hookDeliveryTimeout)
+	if err := deliverHookCollection(
+		config,
+		deliveryTimeout,
 		gateRepoAllowlist(collection.Events, config),
 		collection.UsageMetrics,
 	); err != nil {
@@ -1138,9 +1114,125 @@ func writeDoctorDenyStatus(configPath string, stdout io.Writer) error {
 	return nil
 }
 
-const queueDrainInterval = time.Minute
+const (
+	hookCollectionTimeout = 350 * time.Millisecond
+	hookDeliveryTimeout   = 200 * time.Millisecond
+	queueDrainInterval    = time.Minute
+	queueWriteTimeout     = 250 * time.Millisecond
+)
 
 var eventDeliveryTimeout = 2 * time.Second
+
+func deliverHookCollection(
+	config daemonAdapterConfig,
+	deliveryTimeout time.Duration,
+	events []contracts.AgentEvent,
+	metrics []contracts.UsageMetric,
+) error {
+	hookCtx, stopHook := context.WithTimeout(context.Background(), hookCollectionTimeout)
+	defer stopHook()
+	client := uplink.NewClient(config.uplinkConfig(&http.Client{Timeout: deliveryTimeout}))
+	versionedEvents := withCollectorVersion(events, version.Current().Version)
+	if err := sendHookEventsOrQueue(hookCtx, config, deliveryTimeout, client, versionedEvents); err != nil {
+		return err
+	}
+	if len(metrics) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(hookCtx, deliveryTimeout)
+	defer cancel()
+	counts, err := client.SendUsage(ctx, metrics)
+	if err != nil {
+		return err
+	}
+	if counts.Accepted+counts.Duplicated != len(metrics) || counts.Rejected > 0 {
+		return fmt.Errorf("collector usage metrics not fully accepted")
+	}
+
+	return nil
+}
+
+func sendHookEventsOrQueue(
+	hookCtx context.Context,
+	config daemonAdapterConfig,
+	deliveryTimeout time.Duration,
+	client uplink.Client,
+	events []contracts.AgentEvent,
+) error {
+	return sendHookEventsOrQueueWithOpener(
+		hookCtx,
+		config,
+		deliveryTimeout,
+		client,
+		events,
+		openHookEventQueueContext,
+	)
+}
+
+type hookQueueOpener func(
+	context.Context,
+	daemonAdapterConfig,
+) (*queue.Store, error)
+
+type hookQueueOpenResult struct {
+	store *queue.Store
+	err   error
+}
+
+func sendHookEventsOrQueueWithOpener(
+	hookCtx context.Context,
+	config daemonAdapterConfig,
+	deliveryTimeout time.Duration,
+	client uplink.Client,
+	events []contracts.AgentEvent,
+	openQueue hookQueueOpener,
+) error {
+	if len(events) == 0 {
+		return nil
+	}
+	queueCtx, stopQueue := context.WithCancel(hookCtx)
+	defer stopQueue()
+	queueResult := make(chan hookQueueOpenResult, 1)
+	go func() {
+		eventQueue, err := openQueue(queueCtx, config)
+		queueResult <- hookQueueOpenResult{store: eventQueue, err: err}
+	}()
+
+	ctx, cancel := context.WithTimeout(hookCtx, deliveryTimeout)
+	counts, sendErr := client.SendEvents(ctx, events)
+	cancel()
+	if sendErr == nil && counts.Accepted+counts.Duplicated == len(events) && counts.Rejected == 0 {
+		stopQueue()
+		result := <-queueResult
+		closeHookQueue(result.store)
+		return nil
+	}
+	if sendErr == nil {
+		sendErr = fmt.Errorf("collector events not fully accepted")
+	}
+
+	result := <-queueResult
+	if result.err != nil {
+		closeHookQueue(result.store)
+		return errors.Join(sendErr, fmt.Errorf("open collector event queue: %w", result.err))
+	}
+	if result.store == nil {
+		return errors.Join(sendErr, fmt.Errorf("open collector event queue: returned nil store"))
+	}
+	if queueErr := enqueueEvents(hookCtx, result.store, events); queueErr != nil {
+		closeHookQueue(result.store)
+		return errors.Join(sendErr, queueErr)
+	}
+	closeHookQueue(result.store)
+
+	return nil
+}
+
+func closeHookQueue(eventQueue *queue.Store) {
+	if eventQueue != nil {
+		_ = eventQueue.Close()
+	}
+}
 
 func deliverCollection(
 	ctx context.Context,
@@ -1184,6 +1276,19 @@ func sendEventsOrQueue(
 	eventQueue *queue.Store,
 	events []contracts.AgentEvent,
 ) error {
+	queueCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), queueWriteTimeout)
+	defer cancel()
+
+	return sendEventsOrQueueContext(ctx, queueCtx, client, eventQueue, events)
+}
+
+func sendEventsOrQueueContext(
+	ctx context.Context,
+	queueCtx context.Context,
+	client uplink.Client,
+	eventQueue *queue.Store,
+	events []contracts.AgentEvent,
+) error {
 	if len(events) == 0 {
 		return nil
 	}
@@ -1197,7 +1302,7 @@ func sendEventsOrQueue(
 	if eventQueue == nil {
 		return err
 	}
-	if queueErr := enqueueEvents(eventQueue, events); queueErr != nil {
+	if queueErr := enqueueEvents(queueCtx, eventQueue, events); queueErr != nil {
 		return errors.Join(err, queueErr)
 	}
 
@@ -1205,13 +1310,45 @@ func sendEventsOrQueue(
 }
 
 func openEventQueue(config daemonAdapterConfig) (*queue.Store, error) {
-	auditPath := (localaudit.Store{Path: config.AuditLogPath}).ResolvedPath()
-	return queue.Open(filepath.Join(filepath.Dir(auditPath), "collector-queue.db"), queue.Options{})
+	return openEventQueueContext(context.Background(), config)
 }
 
-func enqueueEvents(eventQueue *queue.Store, events []contracts.AgentEvent) error {
+func openEventQueueContext(
+	ctx context.Context,
+	config daemonAdapterConfig,
+) (*queue.Store, error) {
+	return openEventQueueContextWithOptions(ctx, config, queue.Options{})
+}
+
+func openHookEventQueueContext(
+	ctx context.Context,
+	config daemonAdapterConfig,
+) (*queue.Store, error) {
+	return openEventQueueContextWithOptions(ctx, config, queue.Options{
+		SkipJournalModeConfiguration: true,
+	})
+}
+
+func openEventQueueContextWithOptions(
+	ctx context.Context,
+	config daemonAdapterConfig,
+	options queue.Options,
+) (*queue.Store, error) {
+	auditPath := (localaudit.Store{Path: config.AuditLogPath}).ResolvedPath()
+	return queue.OpenContext(
+		ctx,
+		filepath.Join(filepath.Dir(auditPath), "collector-queue.db"),
+		options,
+	)
+}
+
+func enqueueEvents(
+	ctx context.Context,
+	eventQueue *queue.Store,
+	events []contracts.AgentEvent,
+) error {
 	for _, event := range events {
-		if _, err := eventQueue.Enqueue(context.Background(), event); err != nil {
+		if _, err := eventQueue.Enqueue(ctx, event); err != nil {
 			return fmt.Errorf("enqueue collector event: %w", err)
 		}
 	}
