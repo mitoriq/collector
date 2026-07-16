@@ -1190,7 +1190,10 @@ func sendHookEventsOrQueueWithOpener(
 	if len(events) == 0 {
 		return nil
 	}
-	queueCtx, stopQueue := context.WithCancel(hookCtx)
+	queueCtx, stopQueue := context.WithTimeout(
+		context.WithoutCancel(hookCtx),
+		deliveryTimeout+queueWriteTimeout,
+	)
 	defer stopQueue()
 	queueResult := make(chan hookQueueOpenResult, 1)
 	go func() {
@@ -1219,7 +1222,7 @@ func sendHookEventsOrQueueWithOpener(
 	if result.store == nil {
 		return errors.Join(sendErr, fmt.Errorf("open collector event queue: returned nil store"))
 	}
-	if queueErr := enqueueEvents(hookCtx, result.store, events); queueErr != nil {
+	if queueErr := enqueueEvents(queueCtx, result.store, events); queueErr != nil {
 		closeHookQueue(result.store)
 		return errors.Join(sendErr, queueErr)
 	}

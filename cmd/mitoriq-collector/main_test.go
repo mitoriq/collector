@@ -728,6 +728,60 @@ func TestSendHookEventsOrQueueOpensQueueWhileDeliveryIsPending(t *testing.T) {
 	}
 }
 
+func TestSendHookEventsOrQueueReservesQueueBudgetAfterHookDeadline(t *testing.T) {
+	const expiredHookTimeout = 25 * time.Millisecond
+
+	queuePath := filepath.Join(t.TempDir(), "queue.db")
+	store, err := queue.Open(queuePath, queue.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(
+		http.ResponseWriter,
+		*http.Request,
+	) {
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+	client := uplink.NewClient(uplink.Config{
+		APIURL:            server.URL,
+		AllowInsecureHTTP: true,
+		HTTPClient:        server.Client(),
+	})
+	hookCtx, stopHook := context.WithTimeout(context.Background(), expiredHookTimeout)
+	defer stopHook()
+
+	err = sendHookEventsOrQueueWithOpener(
+		hookCtx,
+		daemonAdapterConfig{},
+		expiredHookTimeout,
+		client,
+		[]contracts.AgentEvent{{IdempotencyKey: "expired-hook-fallback"}},
+		func(context.Context, daemonAdapterConfig) (*queue.Store, error) {
+			<-hookCtx.Done()
+			return store, nil
+		},
+	)
+
+	if err != nil {
+		t.Fatalf("send hook events after delivery deadline: %v", err)
+	}
+	reopenedStore, err := queue.Open(queuePath, queue.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopenedStore.Close()
+	count, err := reopenedStore.Count(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("queued events = %d, want 1 after delivery deadline", count)
+	}
+}
+
 func TestSendHookEventsOrQueueCancelsAndJoinsSpeculativeQueue(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("content-type", "application/json")
