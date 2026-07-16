@@ -247,8 +247,8 @@ jobs:
           fi
 
           printf '%s' "$MACOS_SIGN_P12" | base64 --decode > "$RUNNER_TEMP/collector-release.p12"
-          openssl pkcs12 -in "$RUNNER_TEMP/collector-release.p12" -passin env:MACOS_SIGN_PASSWORD -noout
-          openssl pkcs12 \
+          openssl pkcs12 -legacy -in "$RUNNER_TEMP/collector-release.p12" -passin env:MACOS_SIGN_PASSWORD -noout
+          openssl pkcs12 -legacy \
             -in "$RUNNER_TEMP/collector-release.p12" \
             -passin env:MACOS_SIGN_PASSWORD \
             -clcerts -nokeys \
