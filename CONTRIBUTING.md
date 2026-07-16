@@ -7,6 +7,8 @@ Mitoriq Collector is a small Go binary. Keep changes focused on local collection
 ```sh
 go test ./...
 sh scripts/install.test.sh
+sh scripts/sign-release-binary.test.sh
+sh scripts/check-release-distribution-contract.sh
 mkdir -p bin
 go build -o bin/mitoriq-collector ./cmd/mitoriq-collector
 ```

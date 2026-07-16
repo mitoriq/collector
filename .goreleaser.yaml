@@ -179,6 +179,6 @@ homebrew_casks:
           name: homebrew-tap
           branch: main
     directory: Casks
-    homepage: https://mitoriq.com
+    homepage: https://github.com/mitoriq/collector
     description: Metadata-only local collector for Mitoriq
     license: Apache-2.0
