@@ -1428,6 +1428,21 @@ func defaultLaunchdPath() string {
 	return filepath.Join(home, "Library", "LaunchAgents", launchdServiceLabel+".plist")
 }
 
+func defaultLaunchdLifecycleLockPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = "."
+	}
+
+	return filepath.Join(
+		home,
+		"Library",
+		"Application Support",
+		launchdLifecycleLockDirectory,
+		launchdLifecycleLockFileName,
+	)
+}
+
 func installStatus(dryRun bool) string {
 	if dryRun {
 		return "planned"

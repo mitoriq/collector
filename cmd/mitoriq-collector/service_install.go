@@ -13,11 +13,15 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/mitoriq/collector/internal/filelock"
 )
 
 const (
-	launchdServiceLabel = "com.mitoriq.collector"
-	systemdServiceName  = "mitoriq-collector.service"
+	launchdServiceLabel           = "com.mitoriq.collector"
+	launchdLifecycleLockFileName  = "service-lifecycle.lock"
+	launchdLifecycleLockDirectory = "Mitoriq"
+	systemdServiceName            = "mitoriq-collector.service"
 )
 
 type commandRunner interface {
@@ -148,7 +152,9 @@ func installLaunchd(
 	userID string,
 ) error {
 	if !dryRun {
-		if err := activateLaunchdService(plan, runner, userID); err != nil {
+		if err := withLaunchdLifecycleLock(func() error {
+			return activateLaunchdService(plan, runner, userID)
+		}); err != nil {
 			return err
 		}
 	}
@@ -198,6 +204,42 @@ func activateLaunchdService(plan installPlan, runner commandRunner, userID strin
 			}
 		}
 		return errors.Join(fmt.Errorf("bootstrap launchd service: %w", err), restoreErr, restartErr)
+	}
+
+	return nil
+}
+
+func withLaunchdLifecycleLock(fn func() error) error {
+	lockPath := defaultLaunchdLifecycleLockPath()
+	if err := secureLaunchdLifecycleLockDirectory(filepath.Dir(lockPath)); err != nil {
+		return err
+	}
+	if err := filelock.With(lockPath, fn); err != nil {
+		return fmt.Errorf("lock launchd lifecycle: %w", err)
+	}
+
+	return nil
+}
+
+func secureLaunchdLifecycleLockDirectory(directory string) error {
+	info, err := os.Lstat(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			return fmt.Errorf("create launchd lifecycle lock directory: %w", err)
+		}
+		info, err = os.Lstat(directory)
+	}
+	if err != nil {
+		return fmt.Errorf("inspect launchd lifecycle lock directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("launchd lifecycle lock directory must not be a symlink")
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("launchd lifecycle lock directory is not a directory")
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		return fmt.Errorf("secure launchd lifecycle lock directory: %w", err)
 	}
 
 	return nil
@@ -405,22 +447,35 @@ func uninstallLaunchd(
 ) error {
 	launchdPath := defaultLaunchdPath()
 	if !dryRun {
-		domain, err := launchdUserDomain(userID)
-		if err != nil {
-			return err
-		}
-		serviceTarget := domain + "/" + launchdServiceLabel
-		isLoaded, err := launchdServiceLoaded(runner, serviceTarget)
-		if err != nil {
-			return err
-		}
-		if isLoaded {
-			if err := runner.Run("launchctl", "bootout", serviceTarget); err != nil {
-				return fmt.Errorf("boot out launchd service: %w", err)
+		if err := withLaunchdLifecycleLock(func() error {
+			domain, err := launchdUserDomain(userID)
+			if err != nil {
+				return err
 			}
-		}
-		if err := os.Remove(launchdPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove launchd plist: %w", err)
+			serviceTarget := domain + "/" + launchdServiceLabel
+			isLoaded, err := launchdServiceLoaded(runner, serviceTarget)
+			if err != nil {
+				return err
+			}
+			if isLoaded {
+				if err := runner.Run("launchctl", "bootout", serviceTarget); err != nil {
+					return fmt.Errorf("boot out launchd service: %w", err)
+				}
+				isLoaded, err = launchdServiceLoaded(runner, serviceTarget)
+				if err != nil {
+					return fmt.Errorf("verify launchd service unloaded after bootout: %w", err)
+				}
+				if isLoaded {
+					return fmt.Errorf("launchd service remains loaded after bootout")
+				}
+			}
+			if err := os.Remove(launchdPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("remove launchd plist: %w", err)
+			}
+
+			return nil
+		}); err != nil {
+			return err
 		}
 	}
 	_, err := fmt.Fprintf(stdout, "collector_uninstall_status=%s launchd_plist=%s\n", installStatus(dryRun), launchdPath)

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -137,6 +138,7 @@ type recordedCommand struct {
 }
 
 type recordingCommandRunner struct {
+	mu                       sync.Mutex
 	calls                    []recordedCommand
 	failEnable               bool
 	failLaunchdBootout       bool
@@ -146,6 +148,8 @@ type recordingCommandRunner struct {
 }
 
 func (runner *recordingCommandRunner) Run(name string, args ...string) error {
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
 	runner.calls = append(runner.calls, recordedCommand{name: name, args: append([]string(nil), args...)})
 	if runner.failEnable && name == "systemctl" && reflect.DeepEqual(args, []string{"--user", "enable", "--now", systemdServiceName}) {
 		return errors.New("enable failed")
@@ -159,12 +163,25 @@ func (runner *recordingCommandRunner) Run(name string, args ...string) error {
 	if runner.launchdNotLoaded && name == "launchctl" && len(args) > 0 && args[0] == "print" {
 		return errors.New("launchctl: Could not find service in domain")
 	}
+	if name == "launchctl" && len(args) > 0 && args[0] == "bootout" {
+		runner.launchdNotLoaded = true
+	}
 	if runner.failNextLaunchdBootstrap && name == "launchctl" && len(args) > 0 && args[0] == "bootstrap" {
 		runner.failNextLaunchdBootstrap = false
 		return errors.New("bootstrap failed")
 	}
+	if name == "launchctl" && len(args) > 0 && args[0] == "bootstrap" {
+		runner.launchdNotLoaded = false
+	}
 
 	return nil
+}
+
+func (runner *recordingCommandRunner) callCount() int {
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+
+	return len(runner.calls)
 }
 
 func TestRunInstallForDarwinWritesLaunchdPlistAndBootstrapsNewService(t *testing.T) {
@@ -185,6 +202,21 @@ func TestRunInstallForDarwinWritesLaunchdPlistAndBootstrapsNewService(t *testing
 	launchdPath := filepath.Join(home, "Library", "LaunchAgents", "com.mitoriq.collector.plist")
 	if _, err := os.Stat(launchdPath); err != nil {
 		t.Fatal(err)
+	}
+	lockDirectory := filepath.Dir(defaultLaunchdLifecycleLockPath())
+	lockDirectoryInfo, err := os.Lstat(lockDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !lockDirectoryInfo.IsDir() || lockDirectoryInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("lock directory mode = %v, want directory 0700", lockDirectoryInfo.Mode())
+	}
+	lockInfo, err := os.Lstat(defaultLaunchdLifecycleLockPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !lockInfo.Mode().IsRegular() || lockInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("lock file mode = %v, want regular file 0600", lockInfo.Mode())
 	}
 	expectedCalls := []recordedCommand{
 		{name: "launchctl", args: []string{"print", "gui/501/com.mitoriq.collector"}},
@@ -607,6 +639,7 @@ func TestRunUninstallForDarwinBootsOutLoadedServiceBeforeRemovingPlist(t *testin
 	expectedCalls := []recordedCommand{
 		{name: "launchctl", args: []string{"print", "gui/501/com.mitoriq.collector"}},
 		{name: "launchctl", args: []string{"bootout", "gui/501/com.mitoriq.collector"}},
+		{name: "launchctl", args: []string{"print", "gui/501/com.mitoriq.collector"}},
 	}
 	if !reflect.DeepEqual(runner.calls, expectedCalls) {
 		t.Fatalf("calls = %#v, want %#v", runner.calls, expectedCalls)
