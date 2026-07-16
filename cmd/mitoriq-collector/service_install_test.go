@@ -13,8 +13,7 @@ import (
 )
 
 func TestRunInstallPrintSettingsJSONForEachToolWithoutInstallingService(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestUserHome(t)
 	binaryPath := "/opt/mitoriq/bin/mitoriq-collector"
 	tests := []struct {
 		name     string
@@ -93,6 +92,7 @@ func TestRunInstallPrintSettingsJSONForEachToolWithoutInstallingService(t *testi
 }
 
 func TestRunInstallPrintSettingsJSONRequiresOneSupportedTool(t *testing.T) {
+	setTestUserHome(t)
 	for _, tools := range []string{"claude,codex", "claude,claude", "unknown"} {
 		var stdout bytes.Buffer
 		var stderr bytes.Buffer
@@ -113,6 +113,7 @@ func TestRunInstallPrintSettingsJSONRequiresOneSupportedTool(t *testing.T) {
 }
 
 func TestRunInstallPrintSettingsJSONRejectsUnsafeBinaryPathWithoutOutput(t *testing.T) {
+	setTestUserHome(t)
 	for _, binaryPath := range []string{"/opt/mitoriq\ncollector", "/opt/mitoriq\rcollector", "/opt/mitoriq\x00collector"} {
 		var stdout bytes.Buffer
 		var stderr bytes.Buffer
@@ -185,8 +186,7 @@ func (runner *recordingCommandRunner) callCount() int {
 }
 
 func TestRunInstallForDarwinWritesLaunchdPlistAndBootstrapsNewService(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := setTestUserHome(t)
 	runner := &recordingCommandRunner{launchdNotLoaded: true}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -231,8 +231,7 @@ func TestRunInstallForDarwinWritesLaunchdPlistAndBootstrapsNewService(t *testing
 }
 
 func TestRunInstallForDarwinReplacesLoadedServiceBeforeBootstrap(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := setTestUserHome(t)
 	launchdPath := filepath.Join(home, "Library", "LaunchAgents", "com.mitoriq.collector.plist")
 	if err := os.MkdirAll(filepath.Dir(launchdPath), 0o755); err != nil {
 		t.Fatal(err)
@@ -270,8 +269,7 @@ func TestRunInstallForDarwinReplacesLoadedServiceBeforeBootstrap(t *testing.T) {
 }
 
 func TestRunInstallForDarwinRestoresPreviousServiceWhenBootstrapFails(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := setTestUserHome(t)
 	launchdPath := filepath.Join(home, "Library", "LaunchAgents", "com.mitoriq.collector.plist")
 	if err := os.MkdirAll(filepath.Dir(launchdPath), 0o755); err != nil {
 		t.Fatal(err)
@@ -311,8 +309,7 @@ func TestRunInstallForDarwinRestoresPreviousServiceWhenBootstrapFails(t *testing
 }
 
 func TestRunInstallForDarwinRestoresPreviousPlistWhenBootoutFails(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := setTestUserHome(t)
 	launchdPath := filepath.Join(home, "Library", "LaunchAgents", "com.mitoriq.collector.plist")
 	if err := os.MkdirAll(filepath.Dir(launchdPath), 0o755); err != nil {
 		t.Fatal(err)
@@ -350,8 +347,7 @@ func TestRunInstallForDarwinRestoresPreviousPlistWhenBootoutFails(t *testing.T) 
 }
 
 func TestRunInstallForDarwinRemovesNewPlistWhenInitialBootstrapFails(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := setTestUserHome(t)
 	runner := &recordingCommandRunner{
 		failNextLaunchdBootstrap: true,
 		launchdNotLoaded:         true,
@@ -381,8 +377,7 @@ func TestRunInstallForDarwinRemovesNewPlistWhenInitialBootstrapFails(t *testing.
 }
 
 func TestRunInstallForDarwinDoesNotMutatePlistWhenServiceInspectionFails(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := setTestUserHome(t)
 	launchdPath := filepath.Join(home, "Library", "LaunchAgents", "com.mitoriq.collector.plist")
 	if err := os.MkdirAll(filepath.Dir(launchdPath), 0o755); err != nil {
 		t.Fatal(err)
@@ -615,8 +610,7 @@ func TestRunInstallForLinuxRollsBackUnitWhenEnableFails(t *testing.T) {
 }
 
 func TestRunUninstallForDarwinBootsOutLoadedServiceBeforeRemovingPlist(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := setTestUserHome(t)
 	launchdPath := filepath.Join(home, "Library", "LaunchAgents", "com.mitoriq.collector.plist")
 	if err := os.MkdirAll(filepath.Dir(launchdPath), 0o755); err != nil {
 		t.Fatal(err)
@@ -647,8 +641,7 @@ func TestRunUninstallForDarwinBootsOutLoadedServiceBeforeRemovingPlist(t *testin
 }
 
 func TestRunUninstallForDarwinRemovesPlistWhenServiceIsNotLoaded(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := setTestUserHome(t)
 	launchdPath := filepath.Join(home, "Library", "LaunchAgents", "com.mitoriq.collector.plist")
 	if err := os.MkdirAll(filepath.Dir(launchdPath), 0o755); err != nil {
 		t.Fatal(err)
@@ -693,8 +686,7 @@ func TestRunUninstallForDarwinLeavesPlistWhenInspectionOrBootoutFails(t *testing
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			home := t.TempDir()
-			t.Setenv("HOME", home)
+			home := setTestUserHome(t)
 			launchdPath := filepath.Join(
 				home,
 				"Library",

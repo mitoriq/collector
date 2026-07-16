@@ -2275,7 +2275,7 @@ func TestRunEnrollStoresTokenWithoutPrintingSecret(t *testing.T) {
 }
 
 func TestRunInstallDryRunPrintsLaunchdAndHookSnippets(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestUserHome(t)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
@@ -2302,7 +2302,7 @@ func TestRunInstallDryRunPrintsLaunchdAndHookSnippets(t *testing.T) {
 }
 
 func TestRunUninstallDryRunPrintsOwnedLaunchdPath(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestUserHome(t)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 

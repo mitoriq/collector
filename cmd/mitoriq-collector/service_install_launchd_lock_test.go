@@ -59,8 +59,7 @@ func (runner *launchdVerificationRunner) Run(name string, args ...string) error 
 }
 
 func TestRunInstallForDarwinWaitsForLifecycleLock(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestUserHome(t)
 	lockPath := defaultLaunchdLifecycleLockPath()
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		t.Fatal(err)
@@ -122,8 +121,7 @@ func TestRunInstallForDarwinWaitsForLifecycleLock(t *testing.T) {
 }
 
 func TestRunInstallAndUninstallForDarwinSerializeLifecycle(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestUserHome(t)
 	installRunner := newBlockingCommandRunner(false)
 	uninstallRunner := &recordingCommandRunner{launchdNotLoaded: true}
 	var installStdout bytes.Buffer
@@ -184,8 +182,7 @@ func TestRunInstallAndUninstallForDarwinSerializeLifecycle(t *testing.T) {
 }
 
 func TestRunInstallForDarwinRejectsSymlinkLifecycleLockDirectory(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestUserHome(t)
 	lockDirectory := filepath.Dir(defaultLaunchdLifecycleLockPath())
 	if err := os.MkdirAll(filepath.Dir(lockDirectory), 0o755); err != nil {
 		t.Fatal(err)
@@ -214,8 +211,7 @@ func TestRunInstallForDarwinRejectsSymlinkLifecycleLockDirectory(t *testing.T) {
 }
 
 func TestRunInstallForDarwinRejectsSymlinkLifecycleLockFile(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestUserHome(t)
 	lockPath := defaultLaunchdLifecycleLockPath()
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		t.Fatal(err)
@@ -244,8 +240,7 @@ func TestRunInstallForDarwinRejectsSymlinkLifecycleLockFile(t *testing.T) {
 }
 
 func TestRunUninstallForDarwinLeavesPlistWhenServiceRemainsLoadedAfterBootout(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := setTestUserHome(t)
 	launchdPath := filepath.Join(home, "Library", "LaunchAgents", "com.mitoriq.collector.plist")
 	if err := os.MkdirAll(filepath.Dir(launchdPath), 0o755); err != nil {
 		t.Fatal(err)
@@ -284,8 +279,7 @@ func TestRunUninstallForDarwinLeavesPlistWhenServiceRemainsLoadedAfterBootout(t 
 }
 
 func TestRunUninstallForDarwinLeavesPlistWhenPostBootoutInspectionFails(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := setTestUserHome(t)
 	launchdPath := filepath.Join(home, "Library", "LaunchAgents", "com.mitoriq.collector.plist")
 	if err := os.MkdirAll(filepath.Dir(launchdPath), 0o755); err != nil {
 		t.Fatal(err)
