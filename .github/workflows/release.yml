@@ -49,6 +49,9 @@ jobs:
       - name: Test installer
         run: sh scripts/install.test.sh
 
+      - name: Test release signing helper
+        run: sh scripts/sign-release-binary.test.sh
+
       - name: Audit Go dependencies
         uses: golang/govulncheck-action@b625fbe08f3bccbe446d94fbf87fcc875a4f50ee # v1
         with:

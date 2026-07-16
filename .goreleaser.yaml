@@ -70,15 +70,13 @@ builds:
 
 binary_signs:
   - id: cosign-binaries
-    cmd: cosign
-    signature: "${artifact}.sig"
+    cmd: sh
+    signature: "${artifact}_{{ .Os }}_{{ .Arch }}.sig"
     stdin: "{{ .Env.COSIGN_PASSWORD }}"
     args:
-      - sign-blob
-      - "--key={{ .Env.COSIGN_KEY_PATH }}"
-      - "--output-signature=${signature}"
+      - ./scripts/sign-release-binary.sh
       - "${artifact}"
-      - --yes
+      - "${signature}"
     artifacts: binary
     ids:
       - mitoriq-collector-linux
@@ -99,9 +97,23 @@ notarize:
         timeout: 20m
 
 archives:
-  - id: binary-archives
+  - id: binary-archives-darwin
     ids:
       - mitoriq-collector-darwin
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    formats:
+      - tar.gz
+    files:
+      - LICENSE
+      - NOTICE
+      - THIRD_PARTY_NOTICES.md
+      - THIRD_PARTY_LICENSES/**/*
+  - id: binary-archives-linux
+    ids:
       - mitoriq-collector-linux
     name_template: >-
       {{ .ProjectName }}_
@@ -115,6 +127,8 @@ archives:
       - NOTICE
       - THIRD_PARTY_NOTICES.md
       - THIRD_PARTY_LICENSES/**/*
+      - src: "dist/archive-signatures/{{ .Os }}_{{ .Arch }}/mitoriq-collector.sig"
+        strip_parent: true
 
 checksum:
   name_template: checksums.txt
@@ -149,7 +163,7 @@ release:
 homebrew_casks:
   - name: mitoriq-collector
     ids:
-      - binary-archives
+      - binary-archives-darwin
     binaries:
       - mitoriq-collector
     repository:
