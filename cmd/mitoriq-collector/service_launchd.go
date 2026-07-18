@@ -722,7 +722,7 @@ func (plan installPlan) launchdPlist() (string, error) {
 	if plan.BinaryPath == "" || strings.ContainsAny(plan.BinaryPath, "\x00\r\n") {
 		return "", fmt.Errorf("binary path contains unsupported characters")
 	}
-	if !path.IsAbs(plan.BinaryPath) {
+	if !isAbsoluteLaunchdBinaryPath(plan.BinaryPath) {
 		return "", fmt.Errorf("macOS service binary path must be absolute")
 	}
 	var escapedBinary strings.Builder
@@ -752,6 +752,14 @@ func (plan installPlan) launchdPlist() (string, error) {
   <true/>
 </dict>
 </plist>`, launchdServiceLabel, escapedBinary.String(), launchdOwnershipMarker, launchdOwnershipValue), nil
+}
+
+func isAbsoluteLaunchdBinaryPath(binaryPath string) bool {
+	if path.IsAbs(binaryPath) {
+		return true
+	}
+
+	return runtime.GOOS == "windows" && filepath.IsAbs(binaryPath)
 }
 
 func launchdDomainTarget(userID string) string {

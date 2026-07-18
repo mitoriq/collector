@@ -58,3 +58,10 @@ func TestInstallLaunchdRejectsNonExecutableBinaryDuringPreflight(t *testing.T) {
 		t.Fatalf("commands executed: %#v", runner.calls)
 	}
 }
+
+func TestLaunchdPlistRejectsWindowsAbsolutePathOutsideWindowsTestHost(t *testing.T) {
+	plan := installPlan{BinaryPath: `C:\Program Files\Mitoriq\mitoriq-collector.exe`}
+	if _, err := plan.launchdPlist(); err == nil {
+		t.Fatal("Windows absolute path accepted for a macOS LaunchAgent")
+	}
+}
