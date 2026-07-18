@@ -549,6 +549,18 @@ func TestLaunchdPlistRejectsUnsafeBinaryPaths(t *testing.T) {
 	}
 }
 
+func TestLaunchdPlistUsesMacOSAbsolutePathSemantics(t *testing.T) {
+	plan := installPlan{BinaryPath: "/opt/mitoriq/bin/mitoriq-collector"}
+	if _, err := plan.launchdPlist(); err != nil {
+		t.Fatalf("POSIX absolute path rejected: %v", err)
+	}
+
+	plan.BinaryPath = `C:\Program Files\Mitoriq\mitoriq-collector.exe`
+	if _, err := plan.launchdPlist(); err == nil {
+		t.Fatal("Windows absolute path accepted for a macOS LaunchAgent")
+	}
+}
+
 func TestInstallLaunchdRejectsRootBeforeChangingState(t *testing.T) {
 	plan := launchdTestPlan(t)
 	runner := &fakeLaunchdRunner{}

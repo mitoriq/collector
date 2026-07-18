@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -721,7 +722,7 @@ func (plan installPlan) launchdPlist() (string, error) {
 	if plan.BinaryPath == "" || strings.ContainsAny(plan.BinaryPath, "\x00\r\n") {
 		return "", fmt.Errorf("binary path contains unsupported characters")
 	}
-	if !filepath.IsAbs(plan.BinaryPath) {
+	if !path.IsAbs(plan.BinaryPath) {
 		return "", fmt.Errorf("macOS service binary path must be absolute")
 	}
 	var escapedBinary strings.Builder
