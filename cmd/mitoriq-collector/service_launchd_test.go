@@ -14,12 +14,16 @@ import (
 const testLaunchdUID = "501"
 
 type fakeLaunchdRunner struct {
-	calls          []recordedCommand
-	failures       map[string][]error
-	loaded         bool
-	pid            int
-	serviceOutput  string
-	serviceOutputs []string
+	bootoutPending        bool
+	bootoutVisibleQueries int
+	calls                 []recordedCommand
+	failures              map[string][]error
+	loaded                bool
+	missingPlistWhileLive bool
+	observedPlistPath     string
+	pid                   int
+	serviceOutput         string
+	serviceOutputs        []string
 }
 
 func (runner *fakeLaunchdRunner) Run(name string, args ...string) error {
@@ -41,7 +45,11 @@ func (runner *fakeLaunchdRunner) Run(name string, args ...string) error {
 		if !runner.loaded {
 			return errors.New("Could not find service")
 		}
-		runner.loaded = false
+		if runner.bootoutVisibleQueries > 0 {
+			runner.bootoutPending = true
+		} else {
+			runner.loaded = false
+		}
 	case "kickstart":
 		if !runner.loaded {
 			return errors.New("service is not loaded")
@@ -67,11 +75,21 @@ func (runner *fakeLaunchdRunner) Output(name string, args ...string) (string, er
 	if args[1] == launchdDomainTarget(testLaunchdUID) {
 		return "domain = gui/501\n", nil
 	}
+	if runner.bootoutPending {
+		if runner.bootoutVisibleQueries > 0 {
+			if runner.observedPlistPath != "" {
+				if _, err := os.Stat(runner.observedPlistPath); errors.Is(err, os.ErrNotExist) {
+					runner.missingPlistWhileLive = true
+				}
+			}
+			runner.bootoutVisibleQueries--
+		} else {
+			runner.bootoutPending = false
+			runner.loaded = false
+		}
+	}
 	if !runner.loaded {
 		return "", errors.New("Could not find service \"com.mitoriq.collector\" in domain for user gui: 501")
-	}
-	if runner.pid == 0 {
-		runner.pid = 4242
 	}
 	if len(runner.serviceOutputs) > 0 {
 		output := runner.serviceOutputs[0]
@@ -81,6 +99,9 @@ func (runner *fakeLaunchdRunner) Output(name string, args ...string) (string, er
 	}
 	if runner.serviceOutput != "" {
 		return runner.serviceOutput, nil
+	}
+	if runner.pid == 0 {
+		return "gui/501/com.mitoriq.collector = {\n\tstate = waiting\n}\n", nil
 	}
 
 	return fmt.Sprintf("gui/501/com.mitoriq.collector = {\n\tstate = running\n\tpid = %d\n}\n", runner.pid), nil
@@ -131,7 +152,14 @@ func TestInstallLaunchdBootstrapsKickstartsAndReportsRunning(t *testing.T) {
 	runner := &fakeLaunchdRunner{}
 	var stdout bytes.Buffer
 
-	err := installLaunchd(plan, false, &stdout, runner, testLaunchdUID)
+	err := installLaunchdWithWaitPolicy(
+		plan,
+		false,
+		&stdout,
+		runner,
+		testLaunchdUID,
+		newTestLaunchdWaitPolicy(3),
+	)
 
 	if err != nil {
 		t.Fatal(err)
@@ -155,6 +183,7 @@ func TestInstallLaunchdBootstrapsKickstartsAndReportsRunning(t *testing.T) {
 		{name: launchctlBinaryPath, args: []string{"print", "gui/501"}},
 		{name: launchctlBinaryPath, args: []string{"print", "gui/501/com.mitoriq.collector"}},
 		{name: launchctlBinaryPath, args: []string{"bootstrap", "gui/501", plan.LaunchdPath}},
+		{name: launchctlBinaryPath, args: []string{"print", "gui/501/com.mitoriq.collector"}},
 		{name: launchctlBinaryPath, args: []string{"kickstart", "-p", "gui/501/com.mitoriq.collector"}},
 		{name: launchctlBinaryPath, args: []string{"print", "gui/501/com.mitoriq.collector"}},
 	}
@@ -180,6 +209,56 @@ func TestInstallLaunchdBootstrapsKickstartsAndReportsRunning(t *testing.T) {
 		if count := strings.Count(stdout.String(), "collector_service_phase="+phase+" "); count != 1 {
 			t.Fatalf("phase %q count = %d, stdout = %q", phase, count, stdout.String())
 		}
+	}
+}
+
+func TestInstallLaunchdWaitsForTransientPostBootstrapAbsence(t *testing.T) {
+	plan := launchdTestPlan(t)
+	serviceQueryKey := commandKey(
+		launchctlBinaryPath,
+		"print",
+		launchdServiceTarget(testLaunchdUID),
+	)
+	runner := &fakeLaunchdRunner{failures: map[string][]error{
+		serviceQueryKey: {
+			nil,
+			errors.New("Could not find service \"com.mitoriq.collector\" in domain for user gui: 501"),
+		},
+	}}
+	var stdout bytes.Buffer
+
+	err := installLaunchdWithWaitPolicy(
+		plan,
+		false,
+		&stdout,
+		runner,
+		testLaunchdUID,
+		newTestLaunchdWaitPolicy(3),
+	)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "collector_install_status=running") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "status=failed") {
+		t.Fatalf("transient absence emitted a failure phase: %q", stdout.String())
+	}
+	serviceQueryCount := 0
+	for _, call := range runner.calls {
+		if call.name == launchctlBinaryPath && reflect.DeepEqual(
+			call.args,
+			[]string{"print", launchdServiceTarget(testLaunchdUID)},
+		) {
+			serviceQueryCount++
+		}
+	}
+	if serviceQueryCount != 4 {
+		t.Fatalf("service status query count = %d, calls = %#v", serviceQueryCount, runner.calls)
+	}
+	if countCommand(runner.calls, launchctlBinaryPath, "bootout") != 0 {
+		t.Fatalf("transient absence triggered rollback: %#v", runner.calls)
 	}
 }
 
@@ -291,10 +370,19 @@ func TestInstallLaunchdRestoresPreviousOwnedServiceWhenReplacementFails(t *testi
 		t.Fatal(err)
 	}
 	kickstartKey := commandKey(launchctlBinaryPath, "kickstart", "-p", "gui/501/com.mitoriq.collector")
+	serviceQueryKey := commandKey(
+		launchctlBinaryPath,
+		"print",
+		launchdServiceTarget(testLaunchdUID),
+	)
+	notFound := errors.New("Could not find service \"com.mitoriq.collector\" in domain for user gui: 501")
 	runner := &fakeLaunchdRunner{
-		failures: map[string][]error{kickstartKey: {errors.New("replacement failed")}},
-		loaded:   true,
-		pid:      4100,
+		failures: map[string][]error{
+			kickstartKey:    {errors.New("replacement failed")},
+			serviceQueryKey: {nil, nil, nil, notFound},
+		},
+		loaded: true,
+		pid:    4100,
 	}
 	var stdout bytes.Buffer
 
@@ -338,12 +426,19 @@ func TestInstallLaunchdReportsRollbackFailureWhenPreviousServiceDoesNotRecover(t
 		serviceOutputs: []string{
 			"gui/501/com.mitoriq.collector = {\n\tstate = running\n\tpid = 4100\n}\n",
 			"gui/501/com.mitoriq.collector = {\n\tstate = running\n\tpid = 4101\n}\n",
-			"gui/501/com.mitoriq.collector = {\n\tstate = waiting\n}\n",
 		},
+		serviceOutput: "gui/501/com.mitoriq.collector = {\n\tstate = waiting\n}\n",
 	}
 	var stdout bytes.Buffer
 
-	err = installLaunchd(plan, false, &stdout, runner, testLaunchdUID)
+	err = installLaunchdWithWaitPolicy(
+		plan,
+		false,
+		&stdout,
+		runner,
+		testLaunchdUID,
+		newTestLaunchdWaitPolicy(3),
+	)
 
 	if err == nil || !strings.Contains(err.Error(), "previous launchd service did not return to running state") {
 		t.Fatalf("err = %v", err)

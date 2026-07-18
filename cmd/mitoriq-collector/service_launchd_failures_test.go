@@ -49,7 +49,14 @@ func TestInstallLaunchdReportsDomainPreflightFailurePhase(t *testing.T) {
 	}}
 	var stdout bytes.Buffer
 
-	err := installLaunchd(plan, false, &stdout, runner, testLaunchdUID)
+	err := installLaunchdWithWaitPolicy(
+		plan,
+		false,
+		&stdout,
+		runner,
+		testLaunchdUID,
+		newTestLaunchdWaitPolicy(3),
+	)
 
 	if err == nil {
 		t.Fatal("expected domain preflight failure")
@@ -98,12 +105,20 @@ func TestInstallLaunchdReportsPostActivationStatusFailurePhase(t *testing.T) {
 	runner := &fakeLaunchdRunner{failures: map[string][]error{
 		commandKey(launchctlBinaryPath, "print", launchdServiceTarget(testLaunchdUID)): {
 			nil,
+			nil,
 			errors.New("status unavailable"),
 		},
 	}}
 	var stdout bytes.Buffer
 
-	err := installLaunchd(plan, false, &stdout, runner, testLaunchdUID)
+	err := installLaunchdWithWaitPolicy(
+		plan,
+		false,
+		&stdout,
+		runner,
+		testLaunchdUID,
+		newTestLaunchdWaitPolicy(3),
+	)
 
 	if err == nil {
 		t.Fatal("expected status failure")
@@ -122,7 +137,14 @@ func TestInstallLaunchdReportsNotRunningAfterActivationPhase(t *testing.T) {
 	}
 	var stdout bytes.Buffer
 
-	err := installLaunchd(plan, false, &stdout, runner, testLaunchdUID)
+	err := installLaunchdWithWaitPolicy(
+		plan,
+		false,
+		&stdout,
+		runner,
+		testLaunchdUID,
+		newTestLaunchdWaitPolicy(3),
+	)
 
 	if err == nil {
 		t.Fatal("expected activation verification failure")

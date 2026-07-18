@@ -40,6 +40,24 @@ func installLaunchd(
 	runner commandRunner,
 	userID string,
 ) error {
+	return installLaunchdWithWaitPolicy(
+		plan,
+		dryRun,
+		stdout,
+		runner,
+		userID,
+		defaultLaunchdWaitPolicy(),
+	)
+}
+
+func installLaunchdWithWaitPolicy(
+	plan installPlan,
+	dryRun bool,
+	stdout io.Writer,
+	runner commandRunner,
+	userID string,
+	waitPolicy launchdWaitPolicy,
+) error {
 	plist, err := plan.launchdPlist()
 	if err != nil {
 		phaseErr := writeLaunchdFailurePhase(stdout, "preflight", "invalid_plan", "fix_preflight")
@@ -73,7 +91,7 @@ func installLaunchd(
 	}
 
 	err = withLaunchdLifecycleLock(plan.LaunchdPath, func() error {
-		return installLaunchdLocked(plan, plist, stdout, runner, userID)
+		return installLaunchdLocked(plan, plist, stdout, runner, userID, waitPolicy)
 	})
 	var lockErr *launchdLifecycleLockError
 	if errors.As(err, &lockErr) {
@@ -96,6 +114,7 @@ func installLaunchdLocked(
 	stdout io.Writer,
 	runner commandRunner,
 	userID string,
+	waitPolicy launchdWaitPolicy,
 ) error {
 	if err := validateLaunchdDomainPreflight(runner, userID); err != nil {
 		phaseErr := writeLaunchdFailurePhase(
@@ -145,6 +164,18 @@ func installLaunchdLocked(
 			phaseErr,
 		)
 	}
+	restoreBaseline := func(activationAttempted bool) error {
+		return restoreLaunchdBaseline(
+			plan.LaunchdPath,
+			snapshot,
+			baselineStatus,
+			baselineLoaded,
+			runner,
+			userID,
+			waitPolicy,
+			activationAttempted,
+		)
+	}
 
 	desiredBody := []byte(plist + "\n")
 	isSamePlist := snapshot.exists && bytes.Equal(snapshot.body, desiredBody)
@@ -169,7 +200,7 @@ func installLaunchdLocked(
 
 			return errors.Join(safeLaunchdCommandError("kickstart existing launchd service", err), phaseErr)
 		}
-		status, loaded, err := queryLaunchdStatus(runner, userID)
+		status, loaded, err := waitForLaunchdRunning(runner, userID, waitPolicy)
 		if err != nil {
 			phaseErr := writeLaunchdFailurePhase(stdout, "running", "status_query_failed", "retry_install")
 
@@ -193,10 +224,21 @@ func installLaunchdLocked(
 				phaseErr,
 			)
 		}
+		_, stillLoaded, err := waitForLaunchdAbsent(runner, userID, waitPolicy)
+		if err != nil {
+			phaseErr := writeLaunchdFailurePhase(stdout, "loaded", "status_query_failed", "retry_install")
+
+			return errors.Join(fmt.Errorf("confirm existing launchd service stopped: %w", err), phaseErr)
+		}
+		if stillLoaded {
+			phaseErr := writeLaunchdFailurePhase(stdout, "loaded", "bootout_incomplete", "retry_install")
+
+			return errors.Join(fmt.Errorf("existing launchd service remained loaded after bootout"), phaseErr)
+		}
 	}
 	if !isSamePlist {
 		if err := writeAtomicLaunchdPlist(plan.LaunchdPath, plist, 0o644); err != nil {
-			rollbackErr := restoreLaunchdBaseline(plan.LaunchdPath, snapshot, baselineStatus, baselineLoaded, runner, userID)
+			rollbackErr := restoreBaseline(false)
 			phaseErr := writeLaunchdFailurePhase(stdout, "installed", "plist_write_failed", "retry_install")
 			writeLaunchdRollbackPhase(stdout, rollbackErr)
 
@@ -204,11 +246,11 @@ func installLaunchdLocked(
 		}
 	}
 	if err := writeLaunchdPhase(stdout, "installed", "complete", launchdProcessStatus{}); err != nil {
-		rollbackErr := restoreLaunchdBaseline(plan.LaunchdPath, snapshot, baselineStatus, baselineLoaded, runner, userID)
+		rollbackErr := restoreBaseline(false)
 		return errors.Join(err, rollbackErr)
 	}
 	if err := runner.Run(launchctlBinaryPath, "bootstrap", launchdDomainTarget(userID), plan.LaunchdPath); err != nil {
-		rollbackErr := restoreLaunchdBaseline(plan.LaunchdPath, snapshot, baselineStatus, baselineLoaded, runner, userID)
+		rollbackErr := restoreBaseline(true)
 		phaseErr := writeLaunchdFailurePhase(stdout, "loaded", "bootstrap_failed", "retry_install")
 		writeLaunchdRollbackPhase(stdout, rollbackErr)
 		return errors.Join(
@@ -217,12 +259,27 @@ func installLaunchdLocked(
 			phaseErr,
 		)
 	}
+	_, loaded, err := waitForLaunchdLoaded(runner, userID, waitPolicy)
+	if err != nil {
+		rollbackErr := restoreBaseline(true)
+		phaseErr := writeLaunchdFailurePhase(stdout, "loaded", "status_query_failed", "retry_install")
+		writeLaunchdRollbackPhase(stdout, rollbackErr)
+
+		return errors.Join(fmt.Errorf("read launchd status after bootstrap: %w", err), rollbackErr, phaseErr)
+	}
+	if !loaded {
+		rollbackErr := restoreBaseline(true)
+		phaseErr := writeLaunchdFailurePhase(stdout, "loaded", "not_loaded", "retry_install")
+		writeLaunchdRollbackPhase(stdout, rollbackErr)
+
+		return errors.Join(fmt.Errorf("launchd service did not reach loaded state"), rollbackErr, phaseErr)
+	}
 	if err := writeLaunchdPhase(stdout, "loaded", "complete", launchdProcessStatus{}); err != nil {
-		rollbackErr := restoreLaunchdBaseline(plan.LaunchdPath, snapshot, baselineStatus, baselineLoaded, runner, userID)
+		rollbackErr := restoreBaseline(true)
 		return errors.Join(err, rollbackErr)
 	}
 	if err := runner.Run(launchctlBinaryPath, "kickstart", "-p", launchdServiceTarget(userID)); err != nil {
-		rollbackErr := restoreLaunchdBaseline(plan.LaunchdPath, snapshot, baselineStatus, baselineLoaded, runner, userID)
+		rollbackErr := restoreBaseline(true)
 		phaseErr := writeLaunchdFailurePhase(stdout, "running", "kickstart_failed", "retry_install")
 		writeLaunchdRollbackPhase(stdout, rollbackErr)
 		return errors.Join(
@@ -231,16 +288,16 @@ func installLaunchdLocked(
 			phaseErr,
 		)
 	}
-	status, loaded, err := queryLaunchdStatus(runner, userID)
+	status, loaded, err := waitForLaunchdRunning(runner, userID, waitPolicy)
 	if err != nil {
-		rollbackErr := restoreLaunchdBaseline(plan.LaunchdPath, snapshot, baselineStatus, baselineLoaded, runner, userID)
+		rollbackErr := restoreBaseline(true)
 		phaseErr := writeLaunchdFailurePhase(stdout, "running", "status_query_failed", "retry_install")
 		writeLaunchdRollbackPhase(stdout, rollbackErr)
 
 		return errors.Join(fmt.Errorf("read launchd status after activation: %w", err), rollbackErr, phaseErr)
 	}
 	if !loaded || !isRunningLaunchdStatus(status) {
-		rollbackErr := restoreLaunchdBaseline(plan.LaunchdPath, snapshot, baselineStatus, baselineLoaded, runner, userID)
+		rollbackErr := restoreBaseline(true)
 		phaseErr := writeLaunchdFailurePhase(stdout, "running", "not_running", "retry_install")
 		writeLaunchdRollbackPhase(stdout, rollbackErr)
 
@@ -540,101 +597,6 @@ func safeLaunchdCommandError(action string, err error) error {
 	}
 
 	return fmt.Errorf("%s failed", action)
-}
-
-func restoreLaunchdBaseline(
-	launchdPath string,
-	snapshot launchdPlistSnapshot,
-	baselineStatus launchdProcessStatus,
-	baselineLoaded bool,
-	runner commandRunner,
-	userID string,
-) error {
-	var rollbackErrors []error
-	if _, loaded, err := queryLaunchdStatus(runner, userID); err != nil {
-		rollbackErrors = append(rollbackErrors, fmt.Errorf("inspect partial launchd service: %w", err))
-	} else if loaded {
-		if err := runner.Run(launchctlBinaryPath, "bootout", launchdServiceTarget(userID)); err != nil {
-			rollbackErrors = append(
-				rollbackErrors,
-				safeLaunchdCommandError("bootout partial launchd service", err),
-			)
-		}
-	}
-	plistRestored := false
-	if snapshot.exists {
-		mode := snapshot.mode.Perm()
-		if mode == 0 {
-			mode = 0o644
-		}
-		if err := writeAtomicLaunchdPlistBytes(launchdPath, snapshot.body, mode); err != nil {
-			rollbackErrors = append(rollbackErrors, fmt.Errorf("restore previous launchd plist: %w", err))
-		} else {
-			plistRestored = true
-		}
-	} else if err := os.Remove(launchdPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		rollbackErrors = append(rollbackErrors, fmt.Errorf("remove partial launchd plist: %w", err))
-	} else {
-		plistRestored = true
-	}
-	if plistRestored && baselineLoaded {
-		if err := runner.Run(launchctlBinaryPath, "bootstrap", launchdDomainTarget(userID), launchdPath); err != nil {
-			rollbackErrors = append(
-				rollbackErrors,
-				safeLaunchdCommandError("reload previous launchd service", err),
-			)
-		} else if isRunningLaunchdStatus(baselineStatus) {
-			if err := runner.Run(launchctlBinaryPath, "kickstart", "-p", launchdServiceTarget(userID)); err != nil {
-				rollbackErrors = append(
-					rollbackErrors,
-					safeLaunchdCommandError("restart previous launchd service", err),
-				)
-			}
-		}
-	}
-	if plistRestored {
-		if err := verifyLaunchdPlistBaseline(launchdPath, snapshot); err != nil {
-			rollbackErrors = append(rollbackErrors, err)
-		}
-	}
-	status, loaded, err := queryLaunchdStatus(runner, userID)
-	if err != nil {
-		rollbackErrors = append(rollbackErrors, fmt.Errorf("verify restored launchd service: %w", err))
-	} else if loaded != baselineLoaded {
-		rollbackErrors = append(
-			rollbackErrors,
-			fmt.Errorf("previous launchd loaded state was not restored"),
-		)
-	} else if baselineLoaded && isRunningLaunchdStatus(baselineStatus) && !isRunningLaunchdStatus(status) {
-		rollbackErrors = append(
-			rollbackErrors,
-			fmt.Errorf("previous launchd service did not return to running state"),
-		)
-	}
-
-	return errors.Join(rollbackErrors...)
-}
-
-func verifyLaunchdPlistBaseline(path string, snapshot launchdPlistSnapshot) error {
-	body, err := os.ReadFile(path)
-	if snapshot.exists {
-		if err != nil {
-			return fmt.Errorf("verify restored launchd plist: %w", err)
-		}
-		if !bytes.Equal(body, snapshot.body) {
-			return fmt.Errorf("previous launchd plist bytes were not restored")
-		}
-
-		return nil
-	}
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("verify partial launchd plist removal: %w", err)
-	}
-
-	return fmt.Errorf("partial launchd plist remained after rollback")
 }
 
 func writeLaunchdRollbackPhase(stdout io.Writer, rollbackErr error) {
