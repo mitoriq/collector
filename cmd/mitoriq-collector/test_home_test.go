@@ -36,7 +36,7 @@ func TestSetTestUserHomeControlsOSUserHomeDirAndLaunchdPaths(t *testing.T) {
 		launchdLifecycleLockDirectory,
 		launchdLifecycleLockFileName,
 	)
-	if actual := defaultLaunchdLifecycleLockPath(); actual != expectedLock {
+	if actual := launchdLifecycleLockPath(defaultLaunchdPath()); actual != expectedLock {
 		t.Fatalf("launchd lock path = %q, want %q", actual, expectedLock)
 	}
 }

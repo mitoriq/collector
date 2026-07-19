@@ -45,7 +45,8 @@ Commands:
   daemon          Run the OTLP collector daemon
   doctor          Check collector configuration and discovery
   enroll          Enroll this machine with Mitoriq
-  install         Install the collector service and hooks
+  install         Install the collector service and print optional hook guidance
+  status          Print the collector service status
   uninstall       Uninstall the collector service and hooks
   update          Update the collector
   version         Print collector version information
@@ -83,6 +84,8 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 			err = runEnroll(args[1:], stdout, stderr)
 		case "install":
 			err = runInstall(args[1:], stdout, stderr)
+		case "status":
+			err = runServiceStatus(args[1:], stdout, stderr)
 		case "uninstall":
 			err = runUninstall(args[1:], stdout, stderr)
 		case "update":
@@ -1565,60 +1568,12 @@ func (plan installPlan) hookSnippets() []string {
 	return snippets
 }
 
-func (plan installPlan) launchdPlist() string {
-	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>com.mitoriq.collector</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>%s</string>
-    <string>daemon</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-</dict>
-</plist>`, plan.BinaryPath)
-}
-
-func defaultLaunchdPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		home = "."
-	}
-
-	return filepath.Join(home, "Library", "LaunchAgents", launchdServiceLabel+".plist")
-}
-
-func defaultLaunchdLifecycleLockPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		home = "."
-	}
-
-	return filepath.Join(
-		home,
-		"Library",
-		"Application Support",
-		launchdLifecycleLockDirectory,
-		launchdLifecycleLockFileName,
-	)
-}
-
 func installStatus(dryRun bool) string {
 	if dryRun {
 		return "planned"
 	}
 
 	return "written"
-}
-
-func writeLaunchdPlist(path string, body string) error {
-	return writeLaunchdPlistWithOps(path, body, defaultLaunchdAtomicFileOps())
 }
 
 func allowInsecureForSavedConfig(apiURL string, explicit bool) bool {

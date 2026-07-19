@@ -63,8 +63,9 @@ v0.1 does not send raw prompts, raw assistant output, tool input bodies, code co
 mitoriq-collector version
 mitoriq-collector doctor
 mitoriq-collector enroll --api-url "$MITORIQ_API_URL" --bootstrap-code "$MITORIQ_BOOTSTRAP_CODE"
-mitoriq-collector install --tools claude,codex --dry-run
+mitoriq-collector install --dry-run
 mitoriq-collector install --tools claude --print-settings-json
+mitoriq-collector status
 mitoriq-collector uninstall --dry-run
 mitoriq-collector update
 mitoriq-collector update --set-channel stable
@@ -110,7 +111,7 @@ mitoriq-collector install --tools cursor --print-settings-json > "$HOOKS_DIR/cur
 printf 'hook_settings_dir=%s\n' "$HOOKS_DIR"
 ```
 
-`mktemp -d` creates an unpredictable owner-only directory so another local process cannot redirect these files through a pre-existing symlink. `--print-settings-json` only prints JSON. It does not install the collector service or write a tool configuration file. Use the generated block for the matching user-level configuration, then delete the generated directory:
+`mktemp -d` creates an unpredictable owner-only directory so another local process cannot redirect these files through a pre-existing symlink. `--print-settings-json` only prints JSON. It does not install the collector service or write a tool configuration file. A normal service install does not require `--tools`; when supplied, the option only prints optional hook guidance. Use the generated block for the matching user-level configuration, then delete the generated directory:
 
 | Tool        | Configuration file        | Generated lifecycle events                                                                                                                              |
 | ----------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -126,8 +127,11 @@ Cursor usage counters are supported independently of session state. `mitoriq-col
 
 ## Service Installation
 
-- macOS writes `~/Library/LaunchAgents/com.mitoriq.collector.plist` and immediately bootstraps it in the current user's launchd domain. Re-running install reloads the owned service so an updated plist takes effect; if activation fails, the previous plist and loaded service are restored.
-- macOS uninstall inspects the current user's launchd domain, boots out the loaded collector service, and only then removes the owned plist. Inspection or bootout failure leaves the plist in place and returns an error.
+- macOS writes `~/Library/LaunchAgents/com.mitoriq.collector.plist` atomically, then runs `launchctl bootstrap` and `kickstart -p` in the current GUI user's domain. Success requires a top-level `running` state and a positive PID. `RunAtLoad` and `KeepAlive` provide login/reboot recovery.
+- macOS lifecycle operations share an owner-only lock. Re-running install is duplicate-safe: an identical running service is left untouched, while an identical loaded-but-stopped service is kickstarted without creating a duplicate.
+- macOS only replaces the current exact Mitoriq plist schema or the exact legacy schema. Activation failure restores the previous plist bytes and loaded/running state, then reports whether rollback postconditions passed.
+- `mitoriq-collector status` reports the stable `absent`, `installed`, `loaded`, or `running` service state. Install emits `preflight`, `installed`, `loaded`, and `running` phases; server-side heartbeat confirmation remains an explicit pending step.
+- macOS uninstall inspects the current user's launchd domain, boots out the loaded collector service, confirms it is absent, and only then removes the owned plist. Inspection, bootout, or post-stop verification failure leaves the plist in place and returns an error. The owner-only lifecycle lock remains as token-free coordination metadata so a future install cannot race an in-flight status or uninstall.
 - Linux writes `~/.config/systemd/user/mitoriq-collector.service` with `Restart=always`, reloads the user manager, enables linger for the current user, and runs `systemctl --user enable --now mitoriq-collector.service`. This allows a stable-channel update to exit the old daemon and have systemd start the verified replacement.
 - Linux uninstall runs `systemctl --user disable --now mitoriq-collector.service`, removes only the owned unit path, and reloads the user manager.
 - `--dry-run` prints the platform file and hook snippets without writing files or invoking service-manager commands. Other operating systems return an explicit unsupported error.
@@ -136,7 +140,7 @@ Cursor usage counters are supported independently of session state. `mitoriq-col
 
 - Enrollment fails: check that the bootstrap code is current and has not already been consumed.
 - Keychain unavailable: the collector falls back to `~/.config/mitoriq/enrollment-token`.
-- Daemon not running: run `mitoriq-collector daemon --once`, then inspect the launchd plist or systemd user unit printed by `install --dry-run`. On Linux, also check `systemctl --user status mitoriq-collector.service` and the linger state.
+- Daemon not running: on macOS, run `mitoriq-collector status`; on either platform, run `mitoriq-collector daemon --once`, then inspect the launchd plist or systemd user unit printed by `install --dry-run`. On Linux, also check `systemctl --user status mitoriq-collector.service` and the linger state.
 - Hook not firing: confirm the hook command uses the same binary returned by `which mitoriq-collector`, the generated block was merged into the correct file, and the event matcher still includes the current action. In Codex, also open `/hooks` and confirm the command is trusted.
 - API unreachable: verify the API URL and local network access.
 
