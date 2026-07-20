@@ -60,6 +60,8 @@ type SaveResult struct {
 
 var ErrTokenNotFound = errors.New("enrollment token not found")
 
+const maxEnrollmentTokenFileBytes = 16 << 10
+
 type EnrollmentTokenRecord struct {
 	OrganizationID string
 	Token          string
@@ -75,11 +77,13 @@ func IsTokenNotFound(err error) bool {
 }
 
 type TokenStore struct {
-	CredentialStore CredentialStore
-	CommandOutput   func(context.Context, string, ...string) ([]byte, error)
-	CommandRunner   func(context.Context, string, ...string) error
-	GOOS            string
-	Home            string
+	CredentialStore     CredentialStore
+	CommandOutput       func(context.Context, string, ...string) ([]byte, error)
+	CommandRunner       func(context.Context, string, ...string) error
+	GOOS                string
+	Home                string
+	beforeTokenFileOpen func()
+	syncParent          func(string) error
 }
 
 type HTTPClient interface {
@@ -138,7 +142,7 @@ func (store TokenStore) saveToken(ctx context.Context, record EnrollmentTokenRec
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return SaveResult{}, err
 	}
-	if err := os.WriteFile(path, []byte(record.Token+"\n"), 0o600); err != nil {
+	if err := writeTokenFileAtomic(path, record.Token, store.syncParent); err != nil {
 		return SaveResult{}, err
 	}
 
@@ -147,6 +151,56 @@ func (store TokenStore) saveToken(ctx context.Context, record EnrollmentTokenRec
 		Path:    path,
 		Warning: fallbackWarning(goos),
 	}, nil
+}
+
+func writeTokenFileAtomic(path string, token string, syncParent func(string) error) error {
+	file, err := os.CreateTemp(filepath.Dir(path), ".enrollment-token-*")
+	if err != nil {
+		return fmt.Errorf("create enrollment token: %w", err)
+	}
+	temporaryPath := file.Name()
+	defer os.Remove(temporaryPath)
+	if err := file.Chmod(0o600); err != nil {
+		file.Close()
+		return fmt.Errorf("secure enrollment token: %w", err)
+	}
+	if _, err := file.WriteString(token + "\n"); err != nil {
+		file.Close()
+		return fmt.Errorf("write enrollment token: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return fmt.Errorf("sync enrollment token: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close enrollment token: %w", err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("replace enrollment token: %w", err)
+	}
+	if syncParent == nil {
+		syncParent = syncTokenParentDirectory
+	}
+	if syncParent(filepath.Dir(path)) != nil {
+		return errors.New("sync enrollment token directory")
+	}
+
+	return nil
+}
+
+func syncTokenParentDirectory(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	if err := directory.Sync(); err != nil {
+		directory.Close()
+		return err
+	}
+	return directory.Close()
 }
 
 func (store TokenStore) Load(ctx context.Context) (string, error) {
@@ -182,20 +236,66 @@ func (store TokenStore) loadToken(ctx context.Context, organizationID string) (s
 	}
 
 	path := tokenPath(store.Home, organizationID)
-	content, err := os.ReadFile(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return "", fmt.Errorf("%w: %s", ErrTokenNotFound, path)
+			return "", ErrTokenNotFound
 		}
-
+		return "", errors.New("inspect enrollment token")
+	}
+	if !isSecureTokenFileInfo(info) {
+		return "", errors.New("insecure enrollment token file")
+	}
+	content, err := store.readTokenFile(path, info)
+	if err != nil {
 		return "", err
 	}
 	token := strings.TrimSpace(string(content))
 	if token == "" {
-		return "", fmt.Errorf("%w: %s", ErrTokenNotFound, path)
+		return "", ErrTokenNotFound
 	}
 
 	return token, nil
+}
+
+func (store TokenStore) readTokenFile(path string, inspectedInfo os.FileInfo) (content []byte, returnErr error) {
+	if store.beforeTokenFileOpen != nil {
+		store.beforeTokenFileOpen()
+	}
+	file, err := openTokenFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, ErrTokenNotFound
+		}
+		return nil, errors.New("open enrollment token")
+	}
+	defer func() {
+		if closeErr := file.Close(); returnErr == nil && closeErr != nil {
+			content = nil
+			returnErr = errors.New("close enrollment token")
+		}
+	}()
+
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return nil, errors.New("inspect opened enrollment token")
+	}
+	if !os.SameFile(inspectedInfo, openedInfo) || !isSecureTokenFileInfo(openedInfo) {
+		return nil, errors.New("insecure enrollment token file")
+	}
+	content, err = io.ReadAll(io.LimitReader(file, maxEnrollmentTokenFileBytes+1))
+	if err != nil {
+		return nil, errors.New("read enrollment token")
+	}
+	if len(content) > maxEnrollmentTokenFileBytes {
+		return nil, errors.New("enrollment token file too large")
+	}
+
+	return content, nil
+}
+
+func isSecureTokenFileInfo(info os.FileInfo) bool {
+	return info.Mode().IsRegular() && (runtime.GOOS == "windows" || info.Mode().Perm() == 0o600)
 }
 
 func (store TokenStore) credentialStore() CredentialStore {

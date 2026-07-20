@@ -6,6 +6,10 @@ on:
       - "v*"
   workflow_dispatch:
 
+env:
+  MITORIQ_API_ORIGIN: https://mitoriq-production.up.railway.app
+  MITORIQ_WEB_ORIGIN: https://mitoriq.vercel.app
+
 concurrency:
   group: collector-release
   cancel-in-progress: false
@@ -25,10 +29,32 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.24.x"
+          go-version-file: go.mod
 
       - name: Verify Go modules
         run: go mod verify
+
+      - name: Validate embedded service origins
+        run: |
+          python3 - <<'PY'
+          import os
+          from urllib.parse import urlsplit
+
+          expected_origins = {
+              "MITORIQ_API_ORIGIN": "https://mitoriq-production.up.railway.app",
+              "MITORIQ_WEB_ORIGIN": "https://mitoriq.vercel.app",
+          }
+          for name, expected in expected_origins.items():
+              value = os.environ.get(name, "")
+              try:
+                  parsed = urlsplit(value)
+                  valid_port = parsed.port is None or parsed.port > 0
+              except ValueError:
+                  parsed = None
+                  valid_port = False
+              if value != expected or parsed is None or parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment or not valid_port:
+                  raise SystemExit(f"{name} must equal the official production origin")
+          PY
 
       - name: Check module lock drift
         run: |
@@ -86,7 +112,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.24.x"
+          go-version-file: go.mod
 
       - name: Setup cosign
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
@@ -127,15 +153,20 @@ jobs:
           go run ./cmd/verify-release-archives dist
           for archive in dist/*_linux_*.tar.gz; do
             target="$RUNNER_TEMP/$(basename "$archive" .tar.gz)"
+            signature_arch="${archive##*_linux_}"
+            signature_arch="${signature_arch%.tar.gz}"
+            signature_name="mitoriq-collector_linux_${signature_arch}.sig"
             mkdir -p "$target"
             tar -xzf "$archive" -C "$target"
             cosign verify-blob \
               --key "$RUNNER_TEMP/collector-snapshot.pub" \
-              --signature "$target/mitoriq-collector.sig" \
+              --signature "$target/$signature_name" \
               "$target/mitoriq-collector"
             if [[ "$archive" == *_linux_amd64.tar.gz ]]; then
               "$target/mitoriq-collector" version | grep -Eq \
                 'release_key_sha256=[0-9a-f]{64} .*release_team_id=SNAPSHOT00'
+              grep -aFq "$MITORIQ_API_ORIGIN" "$target/mitoriq-collector"
+              grep -aFq "$MITORIQ_WEB_ORIGIN" "$target/mitoriq-collector"
             fi
           done
 
@@ -164,7 +195,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.24.x"
+          go-version-file: go.mod
 
       - name: Setup cosign
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
@@ -194,6 +225,8 @@ jobs:
         run: |
           set -euo pipefail
           required=(
+            MITORIQ_API_ORIGIN
+            MITORIQ_WEB_ORIGIN
             COLLECTOR_RELEASE_API_URL
             COLLECTOR_COSIGN_PUBLIC_KEY_B64
             COLLECTOR_MACOS_TEAM_ID

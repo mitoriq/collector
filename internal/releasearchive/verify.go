@@ -68,7 +68,7 @@ func VerifyDirectory(distDir string, thirdPartyEntries []string) error {
 		if _, exists := foundTargets[targetKey]; exists {
 			return fmt.Errorf("duplicate archive target: %s", targetKey)
 		}
-		if err := verifyArchive(filepath.Join(distDir, directoryEntry.Name()), expectedEntries(target.goos, thirdPartyEntries)); err != nil {
+		if err := verifyArchive(filepath.Join(distDir, directoryEntry.Name()), expectedEntries(target.goos, target.goarch, thirdPartyEntries)); err != nil {
 			return err
 		}
 		foundTargets[targetKey] = struct{}{}
@@ -166,11 +166,11 @@ func hasArchiveSuffix(name string) bool {
 	return false
 }
 
-func expectedEntries(goos string, thirdPartyEntries []string) map[string]struct{} {
+func expectedEntries(goos string, goarch string, thirdPartyEntries []string) map[string]struct{} {
 	entries := []string{"LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "mitoriq-collector"}
 	entries = append(entries, thirdPartyEntries...)
 	if goos == "linux" {
-		entries = append(entries, "mitoriq-collector.sig")
+		entries = append(entries, "mitoriq-collector_linux_"+goarch+".sig")
 	}
 	expected := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {

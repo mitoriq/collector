@@ -44,8 +44,8 @@ Commands:
   cursor-hook     Process a Cursor hook event
   daemon          Run the OTLP collector daemon
   doctor          Check collector configuration and discovery
-  enroll          Enroll this machine with Mitoriq
   install         Install the collector service and print optional hook guidance
+  setup           Authorize and configure this machine
   status          Print the collector service status
   uninstall       Uninstall the collector service and hooks
   update          Update the collector
@@ -84,6 +84,8 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 			err = runEnroll(args[1:], stdout, stderr)
 		case "install":
 			err = runInstall(args[1:], stdout, stderr)
+		case "setup":
+			err = runSetup(args[1:], stdout, stderr)
 		case "status":
 			err = runServiceStatus(args[1:], stdout, stderr)
 		case "uninstall":

@@ -6,11 +6,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 
 	"github.com/mitoriq/collector/internal/filelock"
 )
 
 var ErrNotFound = errors.New("collector config not found")
+
+var machineLocalUUIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 const (
 	UpdateChannelManual = "manual"
@@ -31,6 +35,7 @@ type Config struct {
 	MaxPrivacyLevel     string               `json:"maxPrivacyLevel,omitempty"`
 	MachineEnrollmentID string               `json:"machineEnrollmentId"`
 	MachineID           string               `json:"machineId"`
+	MachineLocalUUID    string               `json:"machineLocalUuid,omitempty"`
 	MemberID            string               `json:"memberId"`
 	OrganizationID      string               `json:"organizationId"`
 	RepoAllowlist       []RepoAllowlistEntry `json:"repoAllowlist,omitempty"`
@@ -39,8 +44,9 @@ type Config struct {
 }
 
 type Store struct {
-	Home string
-	Path string
+	Home                string
+	Path                string
+	syncParentDirectory func(string) error
 }
 
 func IsNotFound(err error) bool {
@@ -54,7 +60,7 @@ func (store Store) Save(config Config) error {
 	}
 
 	return filelock.With(path+".lock", func() error {
-		return saveUnlocked(path, config)
+		return saveUnlocked(path, config, store.directorySync())
 	})
 }
 
@@ -77,13 +83,16 @@ func (store Store) Update(update func(Config) (Config, error)) error {
 			return err
 		}
 
-		return saveUnlocked(path, next)
+		return saveUnlocked(path, next, store.directorySync())
 	})
 }
 
-func saveUnlocked(path string, config Config) error {
+func saveUnlocked(path string, config Config, syncDirectory func(string) error) error {
 	if !ValidUpdateChannel(config.UpdateChannel) {
 		return fmt.Errorf("updateChannel must be manual or stable")
+	}
+	if !ValidMachineLocalUUID(config.MachineLocalUUID) {
+		return fmt.Errorf("machineLocalUuid must be a canonical UUID")
 	}
 	body, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
@@ -114,6 +123,9 @@ func saveUnlocked(path string, config Config) error {
 	if err := os.Rename(temporaryPath, path); err != nil {
 		return fmt.Errorf("replace collector config: %w", err)
 	}
+	if err := syncDirectory(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("sync collector config directory: %w", err)
+	}
 
 	return nil
 }
@@ -142,12 +154,19 @@ func loadUnlocked(path string) (Config, error) {
 	if !ValidUpdateChannel(config.UpdateChannel) {
 		return Config{}, fmt.Errorf("updateChannel must be manual or stable")
 	}
+	if !ValidMachineLocalUUID(config.MachineLocalUUID) {
+		return Config{}, fmt.Errorf("machineLocalUuid must be a canonical UUID")
+	}
 
 	return config, nil
 }
 
 func ValidUpdateChannel(value string) bool {
 	return value == "" || value == UpdateChannelManual || value == UpdateChannelStable
+}
+
+func ValidMachineLocalUUID(value string) bool {
+	return value == "" || machineLocalUUIDPattern.MatchString(value)
 }
 
 func EffectiveUpdateChannel(value string) string {
@@ -164,6 +183,25 @@ func (store Store) path() string {
 	}
 
 	return filepath.Join(homeDir(store.Home), ".config", "mitoriq", "collector.json")
+}
+
+func (store Store) directorySync() func(string) error {
+	if store.syncParentDirectory != nil {
+		return store.syncParentDirectory
+	}
+	return syncParentDirectory
+}
+
+func syncParentDirectory(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }
 
 func homeDir(home string) string {

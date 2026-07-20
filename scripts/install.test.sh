@@ -36,7 +36,7 @@ case "$command_name" in
       binary)
         for argument in "$@"; do
           case "$argument" in
-            mitoriq-collector.sig|*/mitoriq-collector.sig)
+            mitoriq-collector_linux_*.sig|*/mitoriq-collector_linux_*.sig)
               printf '%s\n' 'binary signature verification failed' >&2
               exit 42
               ;;
@@ -116,6 +116,16 @@ case "$command_name" in
     ;;
   tar)
     if [ "${1:-}" = "-tzf" ]; then
+      case "${INSTALL_TEST_UNAME_M:-x86_64}" in
+        x86_64|amd64) signature_arch=amd64 ;;
+        arm64|aarch64) signature_arch=arm64 ;;
+        *) signature_arch=unsupported ;;
+      esac
+      signature_name="mitoriq-collector_linux_${signature_arch}.sig"
+      case "$signature_arch" in
+        amd64) other_signature_name='mitoriq-collector_linux_arm64.sig' ;;
+        *) other_signature_name='mitoriq-collector_linux_amd64.sig' ;;
+      esac
       case "${INSTALL_TEST_TAR_MODE:-valid}" in
         valid)
           if [ "${INSTALL_TEST_UNAME_S:-Linux}" = "Darwin" ]; then
@@ -134,7 +144,7 @@ case "$command_name" in
               'THIRD_PARTY_LICENSES/github.com/google/uuid/LICENSE' \
               'THIRD_PARTY_LICENSES/modernc.org/libc/LICENSE-3RD-PARTY.md' \
               'mitoriq-collector' \
-              'mitoriq-collector.sig'
+              "$signature_name"
           fi
           ;;
         traversal)
@@ -144,7 +154,7 @@ case "$command_name" in
             'THIRD_PARTY_NOTICES.md' \
             'THIRD_PARTY_LICENSES/../payload' \
             'mitoriq-collector' \
-            'mitoriq-collector.sig'
+            "$signature_name"
           ;;
         unexpected)
           printf '%s\n' \
@@ -154,7 +164,7 @@ case "$command_name" in
             'THIRD_PARTY_LICENSES/github.com/google/uuid/LICENSE' \
             'payload' \
             'mitoriq-collector' \
-            'mitoriq-collector.sig'
+            "$signature_name"
           ;;
         missing-signature)
           printf '%s\n' \
@@ -164,6 +174,15 @@ case "$command_name" in
             'THIRD_PARTY_LICENSES/github.com/google/uuid/LICENSE' \
             'mitoriq-collector'
           ;;
+        wrong-signature-arch)
+          printf '%s\n' \
+            'LICENSE' \
+            'NOTICE' \
+            'THIRD_PARTY_NOTICES.md' \
+            'THIRD_PARTY_LICENSES/github.com/google/uuid/LICENSE' \
+            'mitoriq-collector' \
+            "$other_signature_name"
+          ;;
         extra-signature)
           printf '%s\n' \
             'LICENSE' \
@@ -171,7 +190,7 @@ case "$command_name" in
             'THIRD_PARTY_NOTICES.md' \
             'THIRD_PARTY_LICENSES/github.com/google/uuid/LICENSE' \
             'mitoriq-collector' \
-            'mitoriq-collector.sig'
+            "$signature_name"
           ;;
         duplicate-license)
           printf '%s\n' \
@@ -181,7 +200,7 @@ case "$command_name" in
             'THIRD_PARTY_LICENSES/github.com/google/uuid/LICENSE' \
             'THIRD_PARTY_LICENSES/github.com/google/uuid/LICENSE' \
             'mitoriq-collector' \
-            'mitoriq-collector.sig'
+            "$signature_name"
           ;;
         missing-notice)
           printf '%s\n' \
@@ -189,7 +208,7 @@ case "$command_name" in
             'THIRD_PARTY_NOTICES.md' \
             'THIRD_PARTY_LICENSES/github.com/google/uuid/LICENSE' \
             'mitoriq-collector' \
-            'mitoriq-collector.sig'
+            "$signature_name"
           ;;
         missing-license)
           printf '%s\n' \
@@ -197,7 +216,7 @@ case "$command_name" in
             'THIRD_PARTY_NOTICES.md' \
             'THIRD_PARTY_LICENSES/github.com/google/uuid/LICENSE' \
             'mitoriq-collector' \
-            'mitoriq-collector.sig'
+            "$signature_name"
           ;;
         missing-third-party-notices)
           printf '%s\n' \
@@ -205,7 +224,7 @@ case "$command_name" in
             'NOTICE' \
             'THIRD_PARTY_LICENSES/github.com/google/uuid/LICENSE' \
             'mitoriq-collector' \
-            'mitoriq-collector.sig'
+            "$signature_name"
           ;;
         missing-binary)
           printf '%s\n' \
@@ -213,7 +232,7 @@ case "$command_name" in
             'NOTICE' \
             'THIRD_PARTY_NOTICES.md' \
             'THIRD_PARTY_LICENSES/github.com/google/uuid/LICENSE' \
-            'mitoriq-collector.sig'
+            "$signature_name"
           ;;
         missing-third-party)
           printf '%s\n' \
@@ -221,7 +240,7 @@ case "$command_name" in
             'NOTICE' \
             'THIRD_PARTY_NOTICES.md' \
             'mitoriq-collector' \
-            'mitoriq-collector.sig'
+            "$signature_name"
           ;;
         *) exit 1 ;;
       esac
@@ -324,6 +343,7 @@ for tar_mode in \
   traversal \
   unexpected \
   missing-signature \
+  wrong-signature-arch \
   duplicate-license \
   missing-license \
   missing-notice \

@@ -27,6 +27,7 @@ func extractReleaseArchive(archive []byte, config Config) (extractedRelease, err
 	var expandedSize int64
 	foundBinary := false
 	foundSignature := false
+	signatureName := binarySignatureName(config)
 	for {
 		header, nextErr := tarReader.Next()
 		if errors.Is(nextErr, io.EOF) {
@@ -50,7 +51,7 @@ func extractReleaseArchive(archive []byte, config Config) (extractedRelease, err
 			}
 			result.binary = content
 			foundBinary = true
-		case config.BinaryName + ".sig":
+		case signatureName:
 			if foundSignature {
 				return extractedRelease{}, fmt.Errorf("%w: duplicate binary signature", ErrUnsafeArchive)
 			}
@@ -91,10 +92,14 @@ func validateArchiveHeader(header *tar.Header, config Config, expandedSize int64
 	if header.Name == config.BinaryName && header.Size > config.BinaryMaxBytes {
 		return fmt.Errorf("%w: binary exceeds %d bytes", ErrDownloadTooLarge, config.BinaryMaxBytes)
 	}
-	if header.Name == config.BinaryName+".sig" && header.Size > config.SignatureMaxBytes {
+	if header.Name == binarySignatureName(config) && header.Size > config.SignatureMaxBytes {
 		return fmt.Errorf("%w: binary signature exceeds %d bytes", ErrDownloadTooLarge, config.SignatureMaxBytes)
 	}
 	return nil
+}
+
+func binarySignatureName(config Config) string {
+	return fmt.Sprintf("%s_%s_%s.sig", config.BinaryName, config.GOOS, config.GOARCH)
 }
 
 func readTarFile(reader io.Reader, declaredSize int64, maxBytes int64) ([]byte, error) {

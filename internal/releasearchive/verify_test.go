@@ -42,7 +42,7 @@ func TestVerifyDirectoryRejectsUnsafeOrIncompleteArchives(t *testing.T) {
 		{
 			name: "symlink entry",
 			mutate: func(t *testing.T, distDir string) {
-				entries := replaceEntry(archiveEntries("darwin"), "mitoriq-collector", fixtureEntry{
+				entries := replaceEntry(archiveEntries("darwin", "amd64"), "mitoriq-collector", fixtureEntry{
 					name: "mitoriq-collector", typeflag: tar.TypeSymlink, linkname: "payload",
 				})
 				writeArchive(t, archivePath(distDir, "darwin", "amd64"), entries)
@@ -52,7 +52,7 @@ func TestVerifyDirectoryRejectsUnsafeOrIncompleteArchives(t *testing.T) {
 		{
 			name: "hardlink entry",
 			mutate: func(t *testing.T, distDir string) {
-				entries := replaceEntry(archiveEntries("linux"), "mitoriq-collector", fixtureEntry{
+				entries := replaceEntry(archiveEntries("linux", "amd64"), "mitoriq-collector", fixtureEntry{
 					name: "mitoriq-collector", typeflag: tar.TypeLink, linkname: "LICENSE",
 				})
 				writeArchive(t, archivePath(distDir, "linux", "amd64"), entries)
@@ -62,7 +62,7 @@ func TestVerifyDirectoryRejectsUnsafeOrIncompleteArchives(t *testing.T) {
 		{
 			name: "character device entry",
 			mutate: func(t *testing.T, distDir string) {
-				entries := replaceEntry(archiveEntries("linux"), "mitoriq-collector", fixtureEntry{
+				entries := replaceEntry(archiveEntries("linux", "arm64"), "mitoriq-collector", fixtureEntry{
 					name: "mitoriq-collector", typeflag: tar.TypeChar,
 				})
 				writeArchive(t, archivePath(distDir, "linux", "arm64"), entries)
@@ -72,7 +72,7 @@ func TestVerifyDirectoryRejectsUnsafeOrIncompleteArchives(t *testing.T) {
 		{
 			name: "fifo entry",
 			mutate: func(t *testing.T, distDir string) {
-				entries := replaceEntry(archiveEntries("darwin"), "mitoriq-collector", fixtureEntry{
+				entries := replaceEntry(archiveEntries("darwin", "arm64"), "mitoriq-collector", fixtureEntry{
 					name: "mitoriq-collector", typeflag: tar.TypeFifo,
 				})
 				writeArchive(t, archivePath(distDir, "darwin", "arm64"), entries)
@@ -82,7 +82,7 @@ func TestVerifyDirectoryRejectsUnsafeOrIncompleteArchives(t *testing.T) {
 		{
 			name: "newline in entry name",
 			mutate: func(t *testing.T, distDir string) {
-				entries := append(archiveEntries("darwin"), fixtureEntry{name: "payload\nLICENSE", typeflag: tar.TypeReg})
+				entries := append(archiveEntries("darwin", "amd64"), fixtureEntry{name: "payload\nLICENSE", typeflag: tar.TypeReg})
 				writeArchive(t, archivePath(distDir, "darwin", "amd64"), entries)
 			},
 			errorDetail: "invalid characters",
@@ -90,7 +90,7 @@ func TestVerifyDirectoryRejectsUnsafeOrIncompleteArchives(t *testing.T) {
 		{
 			name: "parent traversal entry",
 			mutate: func(t *testing.T, distDir string) {
-				entries := append(archiveEntries("linux"), fixtureEntry{name: "../payload", typeflag: tar.TypeReg})
+				entries := append(archiveEntries("linux", "amd64"), fixtureEntry{name: "../payload", typeflag: tar.TypeReg})
 				writeArchive(t, archivePath(distDir, "linux", "amd64"), entries)
 			},
 			errorDetail: "unsafe path",
@@ -98,7 +98,7 @@ func TestVerifyDirectoryRejectsUnsafeOrIncompleteArchives(t *testing.T) {
 		{
 			name: "duplicate entry",
 			mutate: func(t *testing.T, distDir string) {
-				entries := append(archiveEntries("darwin"), fixtureEntry{name: "LICENSE", typeflag: tar.TypeReg})
+				entries := append(archiveEntries("darwin", "arm64"), fixtureEntry{name: "LICENSE", typeflag: tar.TypeReg})
 				writeArchive(t, archivePath(distDir, "darwin", "arm64"), entries)
 			},
 			errorDetail: "duplicate entry",
@@ -106,15 +106,27 @@ func TestVerifyDirectoryRejectsUnsafeOrIncompleteArchives(t *testing.T) {
 		{
 			name: "missing linux signature",
 			mutate: func(t *testing.T, distDir string) {
-				entries := removeEntry(archiveEntries("linux"), "mitoriq-collector.sig")
+				entries := removeEntry(archiveEntries("linux", "arm64"), "mitoriq-collector_linux_arm64.sig")
 				writeArchive(t, archivePath(distDir, "linux", "arm64"), entries)
 			},
-			errorDetail: "missing entries: mitoriq-collector.sig",
+			errorDetail: "missing entries: mitoriq-collector_linux_arm64.sig",
+		},
+		{
+			name: "linux signature for another architecture",
+			mutate: func(t *testing.T, distDir string) {
+				entries := replaceEntry(
+					archiveEntries("linux", "arm64"),
+					"mitoriq-collector_linux_arm64.sig",
+					fixtureEntry{name: "mitoriq-collector_linux_amd64.sig", typeflag: tar.TypeReg, mode: 0o644},
+				)
+				writeArchive(t, archivePath(distDir, "linux", "arm64"), entries)
+			},
+			errorDetail: "unexpected entry",
 		},
 		{
 			name: "collector without owner execute bit",
 			mutate: func(t *testing.T, distDir string) {
-				entries := replaceEntry(archiveEntries("darwin"), "mitoriq-collector", fixtureEntry{
+				entries := replaceEntry(archiveEntries("darwin", "arm64"), "mitoriq-collector", fixtureEntry{
 					name: "mitoriq-collector", typeflag: tar.TypeReg, mode: 0o655,
 				})
 				writeArchive(t, archivePath(distDir, "darwin", "arm64"), entries)
@@ -136,21 +148,21 @@ func TestVerifyDirectoryRejectsUnsafeOrIncompleteArchives(t *testing.T) {
 				if err := os.Remove(archivePath(distDir, "linux", "arm64")); err != nil {
 					t.Fatalf("remove archive: %v", err)
 				}
-				writeArchive(t, archivePathForVersion(distDir, "0.0.2-next", "linux", "arm64"), archiveEntries("linux"))
+				writeArchive(t, archivePathForVersion(distDir, "0.0.2-next", "linux", "arm64"), archiveEntries("linux", "arm64"))
 			},
 			errorDetail: "archive version mismatch",
 		},
 		{
 			name: "non-semver release version",
 			mutate: func(t *testing.T, distDir string) {
-				writeArchive(t, archivePathForVersion(distDir, "garbage", "linux", "arm64"), archiveEntries("linux"))
+				writeArchive(t, archivePathForVersion(distDir, "garbage", "linux", "arm64"), archiveEntries("linux", "arm64"))
 			},
 			errorDetail: "unsupported release archive name",
 		},
 		{
 			name: "prerelease numeric identifier with leading zero",
 			mutate: func(t *testing.T, distDir string) {
-				writeArchive(t, archivePathForVersion(distDir, "1.2.3-01", "linux", "arm64"), archiveEntries("linux"))
+				writeArchive(t, archivePathForVersion(distDir, "1.2.3-01", "linux", "arm64"), archiveEntries("linux", "arm64"))
 			},
 			errorDetail: "invalid semantic version",
 		},
@@ -236,7 +248,7 @@ func writeValidMatrix(t *testing.T, distDir string) {
 		{goos: "linux", goarch: "amd64"},
 		{goos: "linux", goarch: "arm64"},
 	} {
-		writeArchive(t, archivePath(distDir, target.goos, target.goarch), archiveEntries(target.goos))
+		writeArchive(t, archivePath(distDir, target.goos, target.goarch), archiveEntries(target.goos, target.goarch))
 	}
 }
 
@@ -248,12 +260,12 @@ func archivePathForVersion(distDir string, version string, goos string, goarch s
 	return filepath.Join(distDir, "mitoriq-collector_"+version+"_"+goos+"_"+goarch+".tar.gz")
 }
 
-func archiveEntries(goos string) []fixtureEntry {
+func archiveEntries(goos string, goarch string) []fixtureEntry {
 	names := []string{"LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"}
 	names = append(names, fixtureThirdPartyEntries...)
 	names = append(names, "mitoriq-collector")
 	if goos == "linux" {
-		names = append(names, "mitoriq-collector.sig")
+		names = append(names, "mitoriq-collector_linux_"+goarch+".sig")
 	}
 
 	entries := make([]fixtureEntry, 0, len(names))

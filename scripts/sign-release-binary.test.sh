@@ -43,7 +43,7 @@ if [ "${1:-}" != "version" ] || [ "${2:-}" != "-m" ] || [ ! -f "${3:-}" ]; then
   exit 1
 fi
 printf '%s\n' \
-  "${3}: go1.24.0" \
+  "${3}: go1.25.12" \
   "        build   GOOS=${SIGN_TEST_GOOS}" \
   "        build   GOARCH=${SIGN_TEST_GOARCH}"
 EOF

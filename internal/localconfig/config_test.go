@@ -1,6 +1,7 @@
 package localconfig
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -27,6 +28,7 @@ func TestStoreRoundTripUses0600CollectorConfig(t *testing.T) {
 		MaxPrivacyLevel:     "L2",
 		MachineEnrollmentID: "enrollment-1",
 		MachineID:           "machine-1",
+		MachineLocalUUID:    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
 		MemberID:            "member-1",
 		OrganizationID:      "org-1",
 		RepoAllowlist: []RepoAllowlistEntry{
@@ -56,6 +58,47 @@ func TestStoreRoundTripUses0600CollectorConfig(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode = %v", info.Mode().Perm())
+	}
+}
+
+func TestStoreLoadsLegacyConfigWithoutMachineLocalUUID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "collector.json")
+	if err := os.WriteFile(path, []byte("{\"apiUrl\":\"https://api.example\",\"machineId\":\"machine-1\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	config, err := (Store{Path: path}).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.MachineLocalUUID != "" || config.MachineID != "machine-1" {
+		t.Fatalf("legacy config = %#v", config)
+	}
+}
+
+func TestStoreRejectsInvalidMachineLocalUUID(t *testing.T) {
+	store := Store{Home: t.TempDir()}
+	if err := store.Save(Config{MachineLocalUUID: "not-a-uuid"}); err == nil {
+		t.Fatal("invalid machine local UUID was saved")
+	}
+
+	path := filepath.Join(t.TempDir(), "collector.json")
+	if err := os.WriteFile(path, []byte("{\"machineLocalUuid\":\"not-a-uuid\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (Store{Path: path}).Load(); err == nil {
+		t.Fatal("invalid machine local UUID was loaded")
+	}
+}
+
+func TestStoreReportsParentDirectorySyncFailureAfterAtomicRename(t *testing.T) {
+	want := errors.New("sync failed")
+	store := Store{Home: t.TempDir(), syncParentDirectory: func(string) error { return want }}
+	if err := store.Save(Config{}); !errors.Is(err, want) {
+		t.Fatalf("Save() error = %v, want wrapped sync failure", err)
+	}
+	if _, err := os.Stat(store.path()); err != nil {
+		t.Fatalf("atomic rename did not complete before directory sync: %v", err)
 	}
 }
 
