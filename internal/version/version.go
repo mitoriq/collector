@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -21,12 +22,31 @@ var (
 	releaseMacOSTeamID         = ""
 	releaseNextPublicKeyBase64 = ""
 	releasePublicKeyBase64     = ""
+	serviceAPIURL              = ""
+	serviceWebURL              = ""
 )
 
 type Info struct {
 	Version string
 	Commit  string
 	Date    string
+}
+
+type ServiceOrigins struct {
+	APIURL string
+	WebURL string
+}
+
+func CurrentServiceOrigins() (ServiceOrigins, error) {
+	if !isHTTPSOrigin(serviceAPIURL) || !isHTTPSOrigin(serviceWebURL) {
+		return ServiceOrigins{}, fmt.Errorf("service origins are not configured correctly in this build")
+	}
+	return ServiceOrigins{APIURL: serviceAPIURL, WebURL: serviceWebURL}, nil
+}
+
+func isHTTPSOrigin(value string) bool {
+	parsed, err := url.Parse(value)
+	return err == nil && parsed.IsAbs() && parsed.Scheme == "https" && parsed.Hostname() != "" && parsed.User == nil && parsed.Path == "" && parsed.RawPath == "" && parsed.RawQuery == "" && parsed.Fragment == "" && !parsed.ForceQuery
 }
 
 func Current() Info {

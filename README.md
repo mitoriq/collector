@@ -30,7 +30,9 @@ Apple Developer ID signed and notarized binary:
 
 ```sh
 brew install --cask mitoriq/tap/mitoriq-collector
-mitoriq-collector doctor
+mitoriq-collector setup
+mitoriq-collector install
+mitoriq-collector status
 ```
 
 For direct macOS or Linux installation, use the commands rendered by the official
@@ -43,7 +45,14 @@ The official handoff does not download and execute `scripts/install.sh`. The hel
 remains available as auditable source and as a maintainer test fixture, but it is
 not itself a signed release asset. Never pipe a remote installer into a shell.
 
-After enrollment, open Mitoriq web and check `/machines`, `/now`, and `/sessions`.
+`setup` opens a loopback-only Helper and the Mitoriq Web companion. Enter the
+Helper's short-lived confirmation code in Web; the API sends single-use
+enrollment material directly to the Helper in an encrypted envelope. The code,
+device secret, enrollment token, and internal attempt ID are never passed in URL
+parameters or command arguments. If local persistence fails, retry from the
+Helper or rerun `setup` to resume without displaying the secret.
+
+After setup, open Mitoriq web and check `/machines`, `/now`, and `/sessions`.
 
 ## What Is Sent
 
@@ -62,6 +71,7 @@ v0.1 does not send raw prompts, raw assistant output, tool input bodies, code co
 ```sh
 mitoriq-collector version
 mitoriq-collector doctor
+mitoriq-collector setup
 mitoriq-collector enroll --api-url "$MITORIQ_API_URL" --bootstrap-code "$MITORIQ_BOOTSTRAP_CODE"
 mitoriq-collector install --dry-run
 mitoriq-collector install --tools claude --print-settings-json
@@ -72,7 +82,13 @@ mitoriq-collector update --set-channel stable
 mitoriq-collector audit-log --limit 100
 ```
 
-`enroll` stores the enrollment token in macOS Keychain when available, otherwise in `~/.config/mitoriq/enrollment-token` with `0600` permissions. Non-secret IDs and API URL are stored in `~/.config/mitoriq/collector.json`.
+`setup` stores the enrollment token in an owner-only `0600` file under
+`~/.config/mitoriq/enrollment-tokens/` on macOS and Linux. This deliberately
+keeps the token out of command arguments used by platform credential CLIs.
+Non-secret IDs, the stable local machine UUID, and the API URL are stored
+atomically in `~/.config/mitoriq/collector.json`. `enroll` remains available as
+a legacy operator flow for existing bootstrap-code integrations and uses the
+platform credential store when available.
 
 ## Local Deny Rules
 
@@ -138,8 +154,9 @@ Cursor usage counters are supported independently of session state. `mitoriq-col
 
 ## Troubleshooting
 
-- Enrollment fails: check that the bootstrap code is current and has not already been consumed.
-- Keychain unavailable: the collector falls back to `~/.config/mitoriq/enrollment-token`.
+- Setup authorization expires: use the retry action in the local Helper, then enter its newly issued confirmation code in the same Web screen.
+- Legacy enrollment fails: check that the bootstrap code is current and has not already been consumed.
+- Legacy Keychain unavailable: `enroll` falls back to an owner-only file under `~/.config/mitoriq/enrollment-tokens/`.
 - Daemon not running: on macOS, run `mitoriq-collector status`; on either platform, run `mitoriq-collector daemon --once`, then inspect the launchd plist or systemd user unit printed by `install --dry-run`. On Linux, also check `systemctl --user status mitoriq-collector.service` and the linger state.
 - Hook not firing: confirm the hook command uses the same binary returned by `which mitoriq-collector`, the generated block was merged into the correct file, and the event matcher still includes the current action. In Codex, also open `/hooks` and confirm the command is trusted.
 - API unreachable: verify the API URL and local network access.

@@ -7,8 +7,64 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"os"
+	"strings"
 	"testing"
 )
+
+func TestCurrentServiceOriginsAcceptsEmbeddedHTTPSOrigins(t *testing.T) {
+	setServiceOrigins(t, "https://api.mitoriq.example", "https://mitoriq.example")
+	origins, err := CurrentServiceOrigins()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if origins.APIURL != "https://api.mitoriq.example" || origins.WebURL != "https://mitoriq.example" {
+		t.Fatalf("origins = %#v", origins)
+	}
+}
+
+func TestCurrentServiceOriginsRejectsNonOrigins(t *testing.T) {
+	tests := []struct{ apiURL, webURL string }{
+		{"", "https://web.example"}, {"https://api.example", ""},
+		{"http://api.example", "https://web.example"}, {"https://user@api.example", "https://web.example"},
+		{"https://api.example/path", "https://web.example"}, {"https://api.example?query=1", "https://web.example"},
+		{"https://api.example#fragment", "https://web.example"}, {"https://api.example", "https://web.example/"},
+	}
+	for _, test := range tests {
+		setServiceOrigins(t, test.apiURL, test.webURL)
+		if _, err := CurrentServiceOrigins(); err == nil {
+			t.Fatalf("accepted api=%q web=%q", test.apiURL, test.webURL)
+		}
+	}
+}
+
+func TestReleaseConfigurationEmbedsAndValidatesServiceOrigins(t *testing.T) {
+	goreleaser, err := os.ReadFile("../../.goreleaser.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow, err := os.ReadFile("../../.github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"MITORIQ_API_ORIGIN", "MITORIQ_WEB_ORIGIN", "internal/version.serviceAPIURL", "internal/version.serviceWebURL"} {
+		if strings.Count(string(goreleaser), required) < 2 {
+			t.Fatalf("GoReleaser missing %s for both builds", required)
+		}
+	}
+	for _, required := range []string{"MITORIQ_API_ORIGIN: https://mitoriq-production.up.railway.app", "MITORIQ_WEB_ORIGIN: https://mitoriq.vercel.app", "Validate embedded service origins", "expected_origins", "parsed.scheme != \"https\""} {
+		if !strings.Contains(string(workflow), required) {
+			t.Fatalf("release workflow missing %s", required)
+		}
+	}
+}
+
+func setServiceOrigins(t *testing.T, apiURL, webURL string) {
+	t.Helper()
+	previousAPIURL, previousWebURL := serviceAPIURL, serviceWebURL
+	t.Cleanup(func() { serviceAPIURL, serviceWebURL = previousAPIURL, previousWebURL })
+	serviceAPIURL, serviceWebURL = apiURL, webURL
+}
 
 func TestCurrentReleaseTrustDecodesBuildMetadata(t *testing.T) {
 	previousURL := releaseAPIURL

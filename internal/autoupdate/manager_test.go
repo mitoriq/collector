@@ -418,7 +418,7 @@ func newReleaseFixtureForPlatform(t *testing.T, binary []byte, signedBinary []by
 	archiveName := "mitoriq-collector_1.2.3_" + goos + "_" + goarch + ".tar.gz"
 	files := []tarFile{{name: "mitoriq-collector", content: binary, mode: 0o755}}
 	if includeSignature {
-		files = append(files, tarFile{name: "mitoriq-collector.sig", content: signBlob(t, privateKey, signedBinary), mode: 0o644})
+		files = append(files, tarFile{name: "mitoriq-collector_" + goos + "_" + goarch + ".sig", content: signBlob(t, privateKey, signedBinary), mode: 0o644})
 	}
 	archive := makeArchive(t, files)
 	digest := sha256.Sum256(archive)

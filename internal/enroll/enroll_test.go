@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -132,6 +133,57 @@ func TestSaveEnrollmentTokenFallsBackTo0600FileWithoutPrintingToken(t *testing.T
 	}
 }
 
+func TestSaveEnrollmentTokenAtomicallyReplacesFallbackFile(t *testing.T) {
+	home := t.TempDir()
+	store := TokenStore{GOOS: "linux", Home: home}
+	record := EnrollmentTokenRecord{OrganizationID: "org-1", Token: "mtq_e_old_secret"}
+	if _, err := store.SaveForEnrollment(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	record.Token = "mtq_e_new_secret"
+	if _, err := store.SaveForEnrollment(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(home, ".config", "mitoriq", "enrollment-tokens", "org-1")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != record.Token+"\n" {
+		t.Fatalf("stored token mismatch")
+	}
+	temporaryFiles, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".enrollment-token-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(temporaryFiles) != 0 {
+		t.Fatalf("temporary files = %v", temporaryFiles)
+	}
+}
+
+func TestSaveEnrollmentTokenSyncsParentDirectoryAndSurfacesFailure(t *testing.T) {
+	home := t.TempDir()
+	directory := filepath.Join(home, ".config", "mitoriq")
+	var syncedDirectory string
+	store := TokenStore{
+		GOOS: "linux",
+		Home: home,
+		syncParent: func(path string) error {
+			syncedDirectory = path
+			return errors.New("sync failed")
+		},
+	}
+
+	_, err := store.Save(context.Background(), fakeEnrollmentToken())
+	if err == nil {
+		t.Fatal("parent directory sync failure was ignored")
+	}
+	if syncedDirectory != directory {
+		t.Fatalf("synced directory = %q", syncedDirectory)
+	}
+}
+
 func TestSaveEnrollmentTokenUsesKeychainWhenAvailable(t *testing.T) {
 	token := fakeEnrollmentToken()
 	var commandName string
@@ -218,6 +270,145 @@ func TestLoadEnrollmentTokenReadsFallbackFile(t *testing.T) {
 	}
 	if token != fakeEnrollmentToken() {
 		t.Fatalf("token = %q", token)
+	}
+}
+
+func TestLoadEnrollmentTokenRejectsFileSwappedBetweenInspectionAndOpen(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("inode identity semantics are required")
+	}
+	home := t.TempDir()
+	tokenPath := filepath.Join(home, ".config", "mitoriq", "enrollment-token")
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	originalToken := "mtq_e_original_secret"
+	swappedToken := "mtq_e_swapped_secret"
+	if err := os.WriteFile(tokenPath, []byte(originalToken+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	replacementPath := filepath.Join(home, "replacement-token")
+	if err := os.WriteFile(replacementPath, []byte(swappedToken+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var swapErr error
+	store := TokenStore{
+		GOOS: "linux",
+		Home: home,
+		beforeTokenFileOpen: func() {
+			swapErr = os.Rename(replacementPath, tokenPath)
+		},
+	}
+
+	token, err := store.Load(context.Background())
+	if swapErr != nil {
+		t.Fatal(swapErr)
+	}
+	if err == nil {
+		t.Fatalf("swapped token file returned %q", token)
+	}
+	if strings.Contains(err.Error(), home) || strings.Contains(err.Error(), originalToken) || strings.Contains(err.Error(), swappedToken) {
+		t.Fatalf("error leaked sensitive data: %q", err)
+	}
+}
+
+func TestLoadEnrollmentTokenRejectsOversizedFileWithoutLeakingPath(t *testing.T) {
+	home := t.TempDir()
+	tokenPath := filepath.Join(home, ".config", "mitoriq", "enrollment-token")
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, bytes.Repeat([]byte{'x'}, 17<<10), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	token, err := (TokenStore{GOOS: "linux", Home: home}).Load(context.Background())
+	if err == nil {
+		t.Fatalf("oversized token file returned %d bytes", len(token))
+	}
+	if strings.Contains(err.Error(), home) {
+		t.Fatalf("error leaked token path: %q", err)
+	}
+}
+
+func TestLoadEnrollmentTokenRejectsInsecureFileTypesAndModesWithoutLeakingSecrets(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file mode and symlink semantics are required")
+	}
+	tests := []struct {
+		name   string
+		create func(t *testing.T, path string)
+	}{
+		{
+			name: "symlink",
+			create: func(t *testing.T, path string) {
+				t.Helper()
+				target := filepath.Join(t.TempDir(), "token-target")
+				if err := os.WriteFile(target, []byte("secret-token\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "non-regular",
+			create: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Mkdir(path, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "wrong-mode",
+			create: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte("secret-token\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			path := filepath.Join(home, ".config", "mitoriq", "enrollment-token")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			test.create(t, path)
+
+			var openAttempted atomic.Bool
+			token, err := (TokenStore{
+				GOOS: "linux",
+				Home: home,
+				beforeTokenFileOpen: func() {
+					openAttempted.Store(true)
+				},
+			}).Load(context.Background())
+			if err == nil {
+				t.Fatalf("insecure token file returned %q", token)
+			}
+			if openAttempted.Load() {
+				t.Fatal("insecure token file reached the open step")
+			}
+			if strings.Contains(err.Error(), home) || strings.Contains(err.Error(), "secret-token") {
+				t.Fatalf("error leaked sensitive data: %q", err)
+			}
+		})
+	}
+}
+
+func TestLoadEnrollmentTokenMissingErrorDoesNotLeakPath(t *testing.T) {
+	home := t.TempDir()
+	_, err := (TokenStore{GOOS: "linux", Home: home}).Load(context.Background())
+	if !IsTokenNotFound(err) {
+		t.Fatalf("error = %v", err)
+	}
+	if strings.Contains(err.Error(), home) {
+		t.Fatalf("error leaked token path: %q", err)
 	}
 }
 

@@ -75,6 +75,8 @@ case "$arch" in
   *) echo "unsupported architecture: $arch" >&2; exit 1 ;;
 esac
 
+binary_signature="mitoriq-collector_${os}_${arch}.sig"
+
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
@@ -90,7 +92,8 @@ download() {
 
 validate_archive_entries() {
   archive_os="$1"
-  awk -v archive_os="$archive_os" '
+  expected_signature="$2"
+  awk -v archive_os="$archive_os" -v expected_signature="$expected_signature" '
     {
       if ($0 == "" || seen[$0]++) {
         exit 1
@@ -111,7 +114,7 @@ validate_archive_entries() {
         binary_count++
         next
       }
-      if ($0 == "mitoriq-collector.sig") {
+      if ($0 == expected_signature) {
         signature_count++
         next
       }
@@ -180,17 +183,17 @@ download "${base_url}/${archive}" 134217728 "${tmp_dir}/${archive}"
   fi
 
   entries="$(tar -tzf "$archive" | LC_ALL=C sort)"
-  if ! printf '%s\n' "$entries" | validate_archive_entries "$os"; then
+  if ! printf '%s\n' "$entries" | validate_archive_entries "$os" "$binary_signature"; then
     echo "release archive contains unexpected entries" >&2
     exit 1
   fi
 
   tar -xzf "$archive" mitoriq-collector
   if [ "$os" = "linux" ]; then
-    tar -xzf "$archive" mitoriq-collector.sig
+    tar -xzf "$archive" "$binary_signature"
     cosign verify-blob \
       --key "$public_key_path" \
-      --signature mitoriq-collector.sig \
+      --signature "$binary_signature" \
       mitoriq-collector
   else
     codesign --verify --strict --verbose=2 mitoriq-collector

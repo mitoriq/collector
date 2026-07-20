@@ -25,6 +25,12 @@ builds:
         -X github.com/mitoriq/collector/internal/version.version={{ .Version }}
         -X github.com/mitoriq/collector/internal/version.commit={{ .Commit }}
         -X github.com/mitoriq/collector/internal/version.date={{ .CommitDate }}
+        {{- with (index .Env "MITORIQ_API_ORIGIN") }}
+        -X github.com/mitoriq/collector/internal/version.serviceAPIURL={{ . }}
+        {{- end }}
+        {{- with (index .Env "MITORIQ_WEB_ORIGIN") }}
+        -X github.com/mitoriq/collector/internal/version.serviceWebURL={{ . }}
+        {{- end }}
         {{- with (index .Env "COLLECTOR_RELEASE_API_URL") }}
         -X github.com/mitoriq/collector/internal/version.releaseAPIURL={{ . }}
         {{- end }}
@@ -55,6 +61,12 @@ builds:
         -X github.com/mitoriq/collector/internal/version.version={{ .Version }}
         -X github.com/mitoriq/collector/internal/version.commit={{ .Commit }}
         -X github.com/mitoriq/collector/internal/version.date={{ .CommitDate }}
+        {{- with (index .Env "MITORIQ_API_ORIGIN") }}
+        -X github.com/mitoriq/collector/internal/version.serviceAPIURL={{ . }}
+        {{- end }}
+        {{- with (index .Env "MITORIQ_WEB_ORIGIN") }}
+        -X github.com/mitoriq/collector/internal/version.serviceWebURL={{ . }}
+        {{- end }}
         {{- with (index .Env "COLLECTOR_RELEASE_API_URL") }}
         -X github.com/mitoriq/collector/internal/version.releaseAPIURL={{ . }}
         {{- end }}
@@ -127,7 +139,7 @@ archives:
       - NOTICE
       - THIRD_PARTY_NOTICES.md
       - THIRD_PARTY_LICENSES/**/*
-      - src: "dist/archive-signatures/{{ .Os }}_{{ .Arch }}/mitoriq-collector.sig"
+      - src: "{{ .ArtifactPath }}_{{ .Os }}_{{ .Arch }}.sig"
         strip_parent: true
 
 checksum:
