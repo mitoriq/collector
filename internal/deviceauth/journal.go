@@ -108,7 +108,7 @@ func (store JournalStore) Load() (JournalState, error) {
 	if errors.Is(err, os.ErrNotExist) {
 		return JournalState{}, ErrJournalNotFound
 	}
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+	if err != nil || !isSecureJournalFileInfo(info) {
 		return JournalState{}, errors.New("insecure device authorization journal")
 	}
 	openFile := store.openFile
@@ -121,7 +121,7 @@ func (store JournalStore) Load() (JournalState, error) {
 	}
 	defer file.Close()
 	openedInfo, err := file.Stat()
-	if err != nil || !openedInfo.Mode().IsRegular() || openedInfo.Mode().Perm() != 0o600 || !os.SameFile(info, openedInfo) {
+	if err != nil || !isSecureJournalFileInfo(openedInfo) || !os.SameFile(info, openedInfo) {
 		return JournalState{}, errors.New("insecure device authorization journal")
 	}
 	decoder := json.NewDecoder(io.LimitReader(file, 1<<20))
@@ -135,6 +135,10 @@ func (store JournalStore) Load() (JournalState, error) {
 		return JournalState{}, errors.New("invalid device authorization journal")
 	}
 	return state, nil
+}
+
+func isSecureJournalFileInfo(info os.FileInfo) bool {
+	return info.Mode().IsRegular() && (runtime.GOOS == "windows" || info.Mode().Perm() == 0o600)
 }
 
 func (store JournalStore) Remove() error {

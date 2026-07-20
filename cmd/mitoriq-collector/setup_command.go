@@ -346,11 +346,15 @@ func preflightSetupDirectories(directories []string) error {
 		}
 		info, statErr := os.Stat(renamedPath)
 		removeErr := os.Remove(renamedPath)
-		if statErr != nil || info.Mode().Perm() != 0o600 || removeErr != nil {
+		if statErr != nil || !isSecureSetupProbe(info) || removeErr != nil {
 			return errors.New("setup preflight failed")
 		}
 	}
 	return nil
+}
+
+func isSecureSetupProbe(info os.FileInfo) bool {
+	return info.Mode().IsRegular() && (runtime.GOOS == "windows" || info.Mode().Perm() == 0o600)
 }
 
 func writeSetupProbe(file *os.File) error {
