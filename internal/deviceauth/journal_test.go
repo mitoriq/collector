@@ -120,7 +120,7 @@ func TestJournalRejectsSymlinks(t *testing.T) {
 	}
 }
 
-func TestJournalRejectsFileSwappedBetweenInspectionAndOpen(t *testing.T) {
+func TestJournalRejectsFileSwappedAfterOpen(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "journal.json")
 	replacementPath := filepath.Join(directory, "replacement.json")
@@ -128,20 +128,30 @@ func TestJournalRejectsFileSwappedBetweenInspectionAndOpen(t *testing.T) {
 	if err := (JournalStore{Path: path}).Save(state); err != nil {
 		t.Fatal(err)
 	}
-	if err := (JournalStore{Path: replacementPath}).Save(state); err != nil {
+	replacementState := state
+	replacementState.DeviceCode = "replacement-secret"
+	if err := (JournalStore{Path: replacementPath}).Save(replacementState); err != nil {
 		t.Fatal(err)
 	}
+	var swapErr error
 	store := JournalStore{
 		Path: path,
-		openFile: func(openPath string) (*os.File, error) {
-			if err := os.Rename(replacementPath, path); err != nil {
-				return nil, err
-			}
-			return os.Open(openPath)
+		afterOpen: func() {
+			swapErr = os.Rename(replacementPath, path)
 		},
 	}
 
-	if _, err := store.Load(); err == nil {
-		t.Fatal("journal swapped before open was accepted")
+	loaded, loadErr := store.Load()
+	if swapErr == nil {
+		if loadErr == nil {
+			t.Fatalf("journal swapped after open was accepted: deviceCode=%q", loaded.DeviceCode)
+		}
+		return
+	}
+	if loadErr != nil {
+		t.Fatalf("load failed after the platform rejected the path swap: %v", loadErr)
+	}
+	if loaded.DeviceCode != state.DeviceCode {
+		t.Fatalf("loaded deviceCode=%q, want the opened journal", loaded.DeviceCode)
 	}
 }

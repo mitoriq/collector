@@ -38,7 +38,7 @@ type JournalState struct {
 
 type JournalStore struct {
 	Path       string
-	openFile   func(string) (*os.File, error)
+	afterOpen  func()
 	syncParent func(string) error
 }
 
@@ -104,24 +104,28 @@ func writeSyncClose(file *os.File, body []byte) error {
 }
 
 func (store JournalStore) Load() (JournalState, error) {
-	info, err := os.Lstat(store.Path)
+	file, err := openJournalFile(store.Path)
 	if errors.Is(err, os.ErrNotExist) {
 		return JournalState{}, ErrJournalNotFound
 	}
-	if err != nil || !isSecureJournalFileInfo(info) {
-		return JournalState{}, errors.New("insecure device authorization journal")
-	}
-	openFile := store.openFile
-	if openFile == nil {
-		openFile = os.Open
-	}
-	file, err := openFile(store.Path)
 	if err != nil {
 		return JournalState{}, errors.New("open device authorization journal")
 	}
 	defer file.Close()
 	openedInfo, err := file.Stat()
-	if err != nil || !isSecureJournalFileInfo(openedInfo) || !os.SameFile(info, openedInfo) {
+	if err != nil || !isSecureJournalFileInfo(openedInfo) {
+		return JournalState{}, errors.New("insecure device authorization journal")
+	}
+	if store.afterOpen != nil {
+		store.afterOpen()
+	}
+	currentFile, err := openJournalFile(store.Path)
+	if err != nil {
+		return JournalState{}, errors.New("insecure device authorization journal")
+	}
+	currentInfo, statErr := currentFile.Stat()
+	closeErr := currentFile.Close()
+	if statErr != nil || closeErr != nil || !isSecureJournalFileInfo(currentInfo) || !os.SameFile(openedInfo, currentInfo) {
 		return JournalState{}, errors.New("insecure device authorization journal")
 	}
 	decoder := json.NewDecoder(io.LimitReader(file, 1<<20))
